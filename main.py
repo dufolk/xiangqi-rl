@@ -1153,9 +1153,18 @@ def update_network():
                 broadcast_lobby()
             elif kind == "disconnected":
                 value = f"peer:{event['peer_id']}"
+                disconnected_seats = [i for i, seat in enumerate(lobby_seats) if seat == value]
                 lobby_seats = ["ai" if seat == value else seat for seat in lobby_seats]
-                lobby_status = "一位客人已断开，席位改由 AI 接管"
-                broadcast_lobby()
+                if scene == "game":
+                    for seat in disconnected_seats:
+                        game.ai_seats.add(seat)
+                        game.players[seat].name = f"AI {seat + 1}（接管）"
+                    game.ai_count = len(game.ai_seats)
+                    lobby_status = "客人已断开，AI 已接管其席位"
+                    broadcast_game_state()
+                else:
+                    lobby_status = "一位客人已断开，席位改由 AI 接管"
+                    broadcast_lobby()
             elif kind == "action" and scene == "game":
                 peer_id = event["peer_id"]
                 seat = next((i for i, value in enumerate(lobby_seats) if value == f"peer:{peer_id}"), None)
