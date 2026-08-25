@@ -185,10 +185,11 @@ class Player:
 
 
 class Game:
-    def __init__(self, ai_count=3, human_seat=0, target_score=15, player_name="你"):
+    def __init__(self, ai_count=3, human_seat=0, target_score=15, player_name="你", team_mode=False):
         self.ai_count = max(0, min(3, ai_count))
         self.human_seat = max(0, min(3, human_seat))
-        self.target_score = max(5, min(30, target_score))
+        self.team_mode = bool(team_mode)
+        self.target_score = 30 if self.team_mode else max(5, min(30, target_score))
         self.player_name = player_name.strip() or "你"
         self.restart()
 
@@ -226,6 +227,7 @@ class Game:
         self.noble_choices: List[Dict[str, int]] = []
         self.round_end = False
         self.winner: Optional[Player] = None
+        self.winner_team: Optional[int] = None
         self.message = "轮到玩家 1：选择宝石，或选中一张发展卡。"
 
     def make_deck(self, tier):
@@ -389,16 +391,27 @@ class Game:
         else:
             self.finish_turn()
 
+    def team_score(self, team):
+        return sum(self.players[seat].points for seat in range(team, len(self.players), 2))
+
     def finish_turn(self):
-        if self.player.points >= self.target_score:
+        reached_target = any(self.team_score(team) >= self.target_score for team in (0, 1)) if self.team_mode else self.player.points >= self.target_score
+        if reached_target:
             self.round_end = True
         self.turn = (self.turn + 1) % len(self.players)
         if self.turn == 0 and self.round_end:
-            best = max(p.points for p in self.players)
-            candidates = [p for p in self.players if p.points == best]
-            self.winner = min(candidates, key=lambda p: len(p.cards))
+            if self.team_mode:
+                scores = [self.team_score(0), self.team_score(1)]
+                team_cards = [sum(len(self.players[seat].cards) for seat in range(team, len(self.players), 2)) for team in (0, 1)]
+                self.winner_team = max((0, 1), key=lambda team: (scores[team], -team_cards[team]))
+                self.winner = self.players[self.winner_team]
+                self.message = f"游戏结束：{self.winner_team + 1} 队以 {scores[self.winner_team]} 分获胜！"
+            else:
+                best = max(p.points for p in self.players)
+                candidates = [p for p in self.players if p.points == best]
+                self.winner = min(candidates, key=lambda p: len(p.cards))
+                self.message = f"游戏结束：{self.winner.name} 获胜！"
             self.phase = "over"
-            self.message = f"游戏结束：{self.winner.name} 获胜！"
             return
         self.phase = "action"
         self.selected_gems = {}
@@ -409,7 +422,7 @@ class Game:
 game = Game()
 ai_player = GenerativeAIPlayer()
 scene = "setup"
-setup_options = {"player_name": "玩家", "ai_count": 3, "human_seat": 0, "target_score": 15}
+setup_options = {"player_name": "玩家", "ai_count": 3, "human_seat": 0, "target_score": 15, "team_mode": False}
 name_focused = False
 join_ip = "127.0.0.1"
 join_ip_focused = False
@@ -453,14 +466,15 @@ def game_to_data(viewer_seat=None):
         })
     return {
         "ai_count": game.ai_count, "human_seat": game.human_seat, "target_score": game.target_score,
-        "player_name": game.player_name, "bank": game.bank,
+        "team_mode": game.team_mode, "player_name": game.player_name, "bank": game.bank,
         "deck_counts": {str(tier): len(cards) for tier, cards in game.decks.items()},
         "table": {str(tier): [_card_data(card) for card in cards] for tier, cards in game.table.items()},
         "nobles": game.nobles, "players": players,
         "turn": game.turn, "selected_card": list(game.selected_card) if game.selected_card else None,
         "selected_gems": game.selected_gems, "phase": game.phase,
         "noble_choices": game.noble_choices, "round_end": game.round_end,
-        "winner_seat": winner_seat, "message": game.message, "ai_seats": sorted(game.ai_seats),
+        "winner_seat": winner_seat, "winner_team": game.winner_team,
+        "message": game.message, "ai_seats": sorted(game.ai_seats),
     }
 
 
@@ -469,6 +483,7 @@ def game_from_data(data):
     restored.ai_count = int(data["ai_count"])
     restored.human_seat = int(data["human_seat"])
     restored.target_score = int(data["target_score"])
+    restored.team_mode = bool(data.get("team_mode", False))
     restored.player_name = data["player_name"]
     restored.bank = {gem: int(value) for gem, value in data["bank"].items()}
     restored.decks = {int(tier): [None] * int(count) for tier, count in data["deck_counts"].items()}
@@ -490,6 +505,7 @@ def game_from_data(data):
     restored.round_end = bool(data["round_end"])
     winner_seat = data.get("winner_seat")
     restored.winner = restored.players[winner_seat] if winner_seat is not None else None
+    restored.winner_team = data.get("winner_team")
     restored.message = data["message"]
     restored.ai_seats = set(data["ai_seats"])
     return restored
@@ -603,7 +619,9 @@ def draw_player_panel(player, rect, active):
     x, y, w, h = rect
     rounded(rect, PANEL_2 if active else PANEL, 13, player.color if active else None, 3)
     pygame.draw.circle(screen, player.color, (x + 20, y + 20), 7)
-    text(player.name, (x + 34, y + 10), SMALL, TEXT)
+    player_index = game.players.index(player)
+    team_suffix = f" · {1 if player_index % 2 == 0 else 2}队" if game.team_mode else ""
+    text(player.name + team_suffix, (x + 34, y + 10), SMALL, TEXT)
     text(f"{player.points} 分", (x + w - 15, y + 10), SMALL, GOLD, "topright")
 
     text("持有", (x + 14, y + 34), TINY, MUTED)
@@ -648,7 +666,8 @@ def seat_label(value):
 def lobby_payload():
     return {
         "type": "lobby", "host_name": setup_options["player_name"],
-        "target_score": setup_options["target_score"], "seats": lobby_seats,
+        "target_score": 30 if setup_options["team_mode"] else setup_options["target_score"],
+        "team_mode": setup_options["team_mode"], "seats": lobby_seats,
         "seat_labels": [seat_label(value) for value in lobby_seats],
         "address": lan_host.address if lan_host else "",
     }
@@ -713,13 +732,21 @@ def render_setup():
         y = 325 + i * 88
         text(label, (430, y), FONT, TEXT)
         text(hint, (430, y + 31), TINY, MUTED)
-        draw_button(pygame.Rect(850, y - 4, 48, 44), "−", setup_options[key] > minimum, (103, 126, 158))
+        score_locked = key == "target_score" and setup_options["team_mode"]
+        draw_button(pygame.Rect(850, y - 4, 48, 44), "−", setup_options[key] > minimum and not score_locked, (103, 126, 158))
         shown = setup_options[key] + 1 if key == "human_seat" else setup_options[key]
         text(shown, (932, y + 17), FONT, GOLD, "center")
-        draw_button(pygame.Rect(966, y - 4, 48, 44), "+", setup_options[key] < maximum, (103, 126, 158))
+        draw_button(pygame.Rect(966, y - 4, 48, 44), "+", setup_options[key] < maximum and not score_locked, (103, 126, 158))
 
+    text("对局模式", (430, 584), SMALL, TEXT)
+    solo_rect = pygame.Rect(650, 572, 165, 38)
+    team_rect = pygame.Rect(830, 572, 185, 38)
+    rounded(solo_rect, GREEN if not setup_options["team_mode"] else (58, 68, 83), 9)
+    rounded(team_rect, ACCENT if setup_options["team_mode"] else (58, 68, 83), 9)
+    text("单人竞技 · 15分", solo_rect.center, TINY, TEXT, "center")
+    text("2v2 组队 · 30分", team_rect.center, TINY, TEXT, "center")
     model_state = "已启用外部生成式模型" if ai_player.model_enabled else "未配置外部模型，自动使用本地策略 AI"
-    text(model_state, (WIDTH // 2, 602), TINY, GREEN if ai_player.model_enabled else MUTED, "center")
+    text(model_state, (WIDTH // 2, 620), TINY, GREEN if ai_player.model_enabled else MUTED, "center")
     draw_button(pygame.Rect(430, 637, 210, 52), "开始本地对局", True, GREEN)
     draw_button(pygame.Rect(665, 637, 210, 52), "创建局域网房间", True, GOLD)
     text("加入朋友的房间", (970, 654), SMALL, MUTED, "center")
@@ -746,14 +773,19 @@ def render_lobby():
         text(f"已连接 {join_ip} · 固定端口 {LAN_PORT}", (WIDTH // 2, 166), FONT, GREEN, "center")
 
     rounded((300, 215, 940, 500), PANEL, 24, (69, 91, 122), 2)
-    text("房主可点击左右箭头安排每位玩家的座次；未分配席位由 AI 接管。", (WIDTH // 2, 250), SMALL, MUTED, "center")
+    lobby_team_mode = setup_options["team_mode"] if network_mode == "host" else getattr(lan_client, "team_mode", False)
+    mode_hint = "2v2：1、3号位为一队，2、4号位为一队；团队先达到 30 分。" if lobby_team_mode else "单人竞技：各自计分，先达到设定分数。"
+    text(mode_hint, (WIDTH // 2, 238), SMALL, GOLD if lobby_team_mode else MUTED, "center")
+    text("房主可点击左右箭头安排每位玩家的座次；未分配席位由 AI 接管。", (WIDTH // 2, 267), TINY, MUTED, "center")
     labels = [seat_label(value) for value in lobby_seats]
     if network_mode == "guest" and lan_client:
         labels = getattr(lan_client, "seat_labels", labels)
     for i in range(4):
         y = 310 + i * 82
-        rounded((455, y, 630, 60), PANEL_2, 12, (72, 91, 119), 1)
-        text(f"{i + 1} 号位", (485, y + 17), SMALL, GOLD)
+        team_color = ACCENT if i % 2 == 0 else RED
+        rounded((455, y, 630, 60), PANEL_2, 12, team_color if lobby_team_mode else (72, 91, 119), 2 if lobby_team_mode else 1)
+        seat_title = f"{i + 1} 号位" + (f" · {1 if i % 2 == 0 else 2} 队" if lobby_team_mode else "")
+        text(seat_title, (485, y + 17), SMALL, team_color if lobby_team_mode else GOLD)
         text(labels[i] if i < len(labels) else "AI", (WIDTH // 2, y + 18), FONT, TEXT, "center")
         if network_mode == "host":
             draw_button(pygame.Rect(930, y + 9, 52, 42), "‹", True, (103, 126, 158))
@@ -776,7 +808,8 @@ def render():
     mode_title = "局域网联机" if network_mode != "local" else "AI 对战"
     text(f"璀璨宝石 · {mode_title}", (38, 62), SMALL, MUTED)
     text(f"第 {sum(len(p.cards) + len(p.reserved) for p in game.players) + 1} 回合", (355, 31), SMALL, MUTED)
-    text(f"达成 {game.target_score} 分后完成本轮，分高者胜；平局时发展卡少者胜。", (355, 59), TINY, MUTED)
+    rule_text = f"任一队达成 {game.target_score} 分后完成本轮，团队总分高者胜。" if game.team_mode else f"达成 {game.target_score} 分后完成本轮，分高者胜；平局时发展卡少者胜。"
+    text(rule_text, (355, 59), TINY, MUTED)
 
     rounded((20, 110, 345, 560), PANEL, 18)
     text("宝石供应", (42, 132), FONT, TEXT)
@@ -845,6 +878,8 @@ def render():
         draw_button(pygame.Rect(1200, 830, 135, 52), "保留所选", bool(game.selected_card and game.selected_card[0] == "table"), GOLD)
         draw_button(pygame.Rect(1350, 830, 135, 52), "取消选牌", bool(game.selected_card), (129, 148, 174))
 
+    if game.team_mode:
+        text(f"1队 {game.team_score(0)} 分  ·  2队 {game.team_score(1)} 分", (1490, 105), SMALL, GOLD, "topright")
     if network_mode == "guest" and lan_client:
         latency = f"延迟 {lan_client.rtt_ms:.0f} ms" if lan_client.rtt_ms is not None else "延迟测量中…"
         text(latency, (1490, 50), SMALL, GREEN if lan_client.connected else RED, "topright")
@@ -856,8 +891,10 @@ def render():
         screen.blit(overlay, (0, 0))
         rounded((WIDTH // 2 - 280, HEIGHT // 2 - 120, 560, 240), (43, 57, 79), 22, GOLD, 3)
         text("本局结束", (WIDTH // 2, HEIGHT // 2 - 75), TITLE, GOLD, "center")
-        text(f"{game.winner.name} 获胜！", (WIDTH // 2, HEIGHT // 2 - 22), TITLE, TEXT, "center")
-        text(f"得分 {game.winner.points} · 发展卡 {len(game.winner.cards)} · 贵族 {len(game.winner.nobles)}", (WIDTH // 2, HEIGHT // 2 + 22), SMALL, MUTED, "center")
+        winner_title = f"{game.winner_team + 1} 队获胜！" if game.team_mode and game.winner_team is not None else f"{game.winner.name} 获胜！"
+        result_detail = f"团队得分 {game.team_score(game.winner_team)}" if game.team_mode and game.winner_team is not None else f"得分 {game.winner.points} · 发展卡 {len(game.winner.cards)} · 贵族 {len(game.winner.nobles)}"
+        text(winner_title, (WIDTH // 2, HEIGHT // 2 - 22), TITLE, TEXT, "center")
+        text(result_detail, (WIDTH // 2, HEIGHT // 2 + 22), SMALL, MUTED, "center")
         text("按 R 键开始新的一局", (WIDTH // 2, HEIGHT // 2 + 68), SMALL, ACCENT, "center")
 
 
@@ -900,6 +937,8 @@ def ai_legal_actions():
 def ai_snapshot():
     return {
         "target_score": game.target_score,
+        "team_mode": game.team_mode,
+        "team_scores": [game.team_score(0), game.team_score(1)] if game.team_mode else None,
         "bank": game.bank,
         "current_player": {
             "seat": game.turn,
@@ -989,19 +1028,29 @@ def click_setup(pos):
     join_ip_focused = pygame.Rect(535, 699, 340, 43).collidepoint(pos)
     if name_focused or join_ip_focused:
         return
+    if pygame.Rect(650, 572, 165, 38).collidepoint(pos):
+        setup_options["team_mode"] = False
+        setup_options["target_score"] = 15
+        return
+    if pygame.Rect(830, 572, 185, 38).collidepoint(pos):
+        setup_options["team_mode"] = True
+        setup_options["target_score"] = 30
+        return
     keys = [("ai_count", 0, 3), ("human_seat", 0, 3), ("target_score", 5, 30)]
     for i, (key, minimum, maximum) in enumerate(keys):
         y = 325 + i * 88
         if pygame.Rect(850, y - 4, 48, 44).collidepoint(pos):
-            setup_options[key] = max(minimum, setup_options[key] - 1)
+            if key != "target_score" or not setup_options["team_mode"]:
+                setup_options[key] = max(minimum, setup_options[key] - 1)
             return
         if pygame.Rect(966, y - 4, 48, 44).collidepoint(pos):
-            setup_options[key] = min(maximum, setup_options[key] + 1)
+            if key != "target_score" or not setup_options["team_mode"]:
+                setup_options[key] = min(maximum, setup_options[key] + 1)
             return
     player_name = setup_options["player_name"].strip() or "玩家"
     if pygame.Rect(430, 637, 210, 52).collidepoint(pos):
         close_network()
-        game = Game(setup_options["ai_count"], setup_options["human_seat"], setup_options["target_score"], player_name)
+        game = Game(setup_options["ai_count"], setup_options["human_seat"], setup_options["target_score"], player_name, setup_options["team_mode"])
         local_seat = setup_options["human_seat"]
         scene = "game"
         ai_due_at = 0
@@ -1059,7 +1108,7 @@ def click_lobby(pos):
             return
         local_seat = lobby_seats.index("host")
         ai_seats = {i for i, value in enumerate(lobby_seats) if value == "ai"}
-        game = Game(len(ai_seats), local_seat, setup_options["target_score"], setup_options["player_name"])
+        game = Game(len(ai_seats), local_seat, setup_options["target_score"], setup_options["player_name"], setup_options["team_mode"])
         game.ai_seats = ai_seats
         for seat, value in enumerate(lobby_seats):
             if value.startswith("peer:") and lan_host:
@@ -1221,6 +1270,7 @@ def update_network():
             kind = event.get("type")
             if kind == "lobby":
                 lan_client.seat_labels = event.get("seat_labels", ["AI"] * 4)
+                lan_client.team_mode = bool(event.get("team_mode", False))
                 lobby_status = f"已连接房主 {event.get('address', '')}"
             elif kind == "start":
                 local_seat = event.get("seat")
