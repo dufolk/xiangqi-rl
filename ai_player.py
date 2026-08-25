@@ -1,6 +1,5 @@
 import json
 import os
-import random
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List
@@ -30,8 +29,8 @@ class GenerativeAIPlayer:
                     return action_id
             except (OSError, ValueError, KeyError, json.JSONDecodeError, urllib.error.URLError):
                 pass
-        self.last_mode = "本地策略"
-        return self.local_choice(actions)
+        self.last_mode = "团队策略" if snapshot.get("team_mode") else "本地策略"
+        return self.local_choice(snapshot, actions)
 
     def _ask_model(self, snapshot: Dict[str, Any], actions: List[Dict[str, Any]]) -> str:
         prompt = {
@@ -66,19 +65,48 @@ class GenerativeAIPlayer:
         return str(json.loads(content)["action_id"])
 
     @staticmethod
-    def local_choice(actions: List[Dict[str, Any]]) -> str:
+    def local_choice(snapshot: Dict[str, Any], actions: List[Dict[str, Any]]) -> str:
+        """Score legal actions using personal progress plus 2v2 team context."""
+        team_mode = bool(snapshot.get("team_mode"))
+        target = int(snapshot.get("target_score", 15))
+        team_scores = snapshot.get("team_scores") or [0, 0]
+        current = snapshot.get("current_player", {})
+        seat = int(current.get("seat", 0))
+        own_score = int(current.get("score", 0))
+        own_team = seat % 2
+        team_gap = target - int(team_scores[own_team]) if team_mode else target - own_score
+        enemy_gap = target - int(team_scores[1 - own_team]) if team_mode else target
+
         def score(action: Dict[str, Any]) -> float:
             kind = action.get("type")
-            if kind == "buy":
-                return 100 + action.get("points", 0) * 30 + action.get("tier", 0) * 5 + random.random()
+            points = float(action.get("points", 0))
+            noble_progress = float(action.get("noble_progress", 0))
+            enemy_threat = float(action.get("enemy_threat", 0))
+            teammate_interest = float(action.get("teammate_interest", 0))
             if kind == "noble":
-                return 200 + random.random()
-            if kind == "take":
-                return 30 + action.get("usefulness", 0) * 4 + random.random()
+                return 2000 + points * 100
+            if kind == "buy":
+                value = 500 + points * 90 + action.get("tier", 0) * 8 + noble_progress * 28
+                if points >= team_gap:
+                    value += 5000
+                if team_mode and enemy_gap <= 5:
+                    value += points * 35
+                return value
             if kind == "reserve":
-                return 20 + action.get("points", 0) * 4 + action.get("tier", 0) * 2 + random.random()
+                value = 100 + points * 18 + action.get("tier", 0) * 5 + enemy_threat * 75
+                if team_mode:
+                    value -= teammate_interest * 45
+                    if enemy_gap <= 5:
+                        value += enemy_threat * 80
+                return value
+            if kind == "take":
+                value = 180 + float(action.get("usefulness", 0)) * 8
+                if team_mode:
+                    value += float(action.get("deny_value", 0)) * 4
+                    value -= float(action.get("teammate_need", 0)) * 2
+                return value
             if kind == "return":
-                return 10 - action.get("usefulness", 0) + random.random()
-            return random.random()
+                return 80 - float(action.get("usefulness", 0)) * 8
+            return 0
 
-        return max(actions, key=score)["id"]
+        return max(actions, key=lambda action: (score(action), action["id"]))["id"]
