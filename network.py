@@ -69,7 +69,7 @@ class LanHost:
 
     @property
     def address(self) -> str:
-        return f"{local_ip()}:{self.port}"
+        return local_ip()
 
     @property
     def peers(self) -> List[PeerInfo]:
@@ -186,11 +186,11 @@ class LanClient:
         self._send_lock = threading.Lock()
         self._running = threading.Event()
 
-    def connect(self, host: str, port: int = LAN_PORT, timeout: float = 4.0) -> None:
-        if ":" in host:
-            host, port_text = host.rsplit(":", 1)
-            port = int(port_text)
-        sock = socket.create_connection((host.strip(), port), timeout=timeout)
+    def connect(self, host: str, timeout: float = 4.0) -> None:
+        host = host.strip()
+        if not host or ":" in host:
+            raise ValueError("请只输入房主 IP，不要输入端口")
+        sock = socket.create_connection((host, LAN_PORT), timeout=timeout)
         sock.settimeout(None)
         self._sock = sock
         self._running.set()

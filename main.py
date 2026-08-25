@@ -704,7 +704,7 @@ def render_lobby():
     if network_mode == "host" and lan_host:
         text(f"让朋友输入：{lan_host.address}", (WIDTH // 2, 166), FONT, GREEN, "center")
     elif network_mode == "guest":
-        text(f"已连接 {join_ip}:{LAN_PORT}" if ":" not in join_ip else f"已连接 {join_ip}", (WIDTH // 2, 166), FONT, GREEN, "center")
+        text(f"已连接 {join_ip} · 固定端口 {LAN_PORT}", (WIDTH // 2, 166), FONT, GREEN, "center")
 
     rounded((300, 215, 940, 500), PANEL, 24, (69, 91, 122), 2)
     text("房主可点击左右箭头安排每位玩家的座次；未分配席位由 AI 接管。", (WIDTH // 2, 250), SMALL, MUTED, "center")
