@@ -31,7 +31,7 @@ class GenerativeAIPlayer:
             except (OSError, ValueError, KeyError, json.JSONDecodeError, urllib.error.URLError):
                 pass
         self.last_mode = "本地策略"
-        return self._local_choice(actions)
+        return self.local_choice(actions)
 
     def _ask_model(self, snapshot: Dict[str, Any], actions: List[Dict[str, Any]]) -> str:
         prompt = {
@@ -66,7 +66,7 @@ class GenerativeAIPlayer:
         return str(json.loads(content)["action_id"])
 
     @staticmethod
-    def _local_choice(actions: List[Dict[str, Any]]) -> str:
+    def local_choice(actions: List[Dict[str, Any]]) -> str:
         def score(action: Dict[str, Any]) -> float:
             kind = action.get("type")
             if kind == "buy":
