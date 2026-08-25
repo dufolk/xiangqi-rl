@@ -40,17 +40,49 @@ GEM_COLOR["gold"] = GOLD
 TIER_COLORS = [(112, 182, 236), (160, 117, 229), (241, 174, 80)]
 
 def _make_font(size, bold=False):
-    # 直接加载系统中的中文字体文件，避免 SysFont 找不到 PingFang 时
+    # 直接加载系统中的中文字体文件，避免 SysFont 找不到中文字体时
     # 回退到不支持中文的位图字体导致乱码。
-    candidates = [
-        "/System/Library/Fonts/STHeiti Medium.ttc",
-        "/System/Library/Fonts/STHeiti Light.ttc",
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-    ]
+    import sys
+    candidates = []
+
+    if sys.platform == "win32":
+        win_fonts = os.path.join(os.environ.get("SystemRoot", "C:/Windows"), "Fonts")
+        candidates = [
+            os.path.join(win_fonts, "msyh.ttc"),
+            os.path.join(win_fonts, "msyhbd.ttc"),
+            os.path.join(win_fonts, "simhei.ttf"),
+            os.path.join(win_fonts, "simsun.ttc"),
+            os.path.join(win_fonts, "yahei.ttf"),
+        ]
+    elif sys.platform == "darwin":
+        candidates = [
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        ]
+    else:
+        candidates = [
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/arphic/uming.ttc",
+        ]
+
     for path in candidates:
+        if not path or not os.path.exists(path):
+            continue
         try:
             f = pygame.font.Font(path, size)
             f.set_bold(bold)
+            return f
+        except Exception:
+            continue
+
+    # 跨平台回退：优先挑选一个带中文覆盖的 SysFont，最后兜底默认字体。
+    for name in ("Microsoft YaHei", "PingFang SC", "Heiti SC", "SimHei",
+                 "Noto Sans CJK SC", "WenQuanYi Zen Hei", "Arial Unicode MS"):
+        try:
+            f = pygame.font.SysFont(name, size, bold=bold)
             return f
         except Exception:
             continue
