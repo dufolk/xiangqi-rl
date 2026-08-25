@@ -1,3 +1,4 @@
+import math
 import os
 import random
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -420,6 +421,12 @@ lobby_seats = ["ai", "ai", "ai", "ai"]
 lobby_status = ""
 network_error = ""
 last_state_broadcast = 0
+ambient_particles = [
+    [random.uniform(0, WIDTH), random.uniform(0, HEIGHT), random.uniform(0.08, 0.28), random.randint(1, 3), random.uniform(0, math.tau)]
+    for _ in range(48)
+]
+turn_flash_started = pygame.time.get_ticks()
+last_visual_turn = -1
 ai_due_at = 0
 ai_executor = ThreadPoolExecutor(max_workers=1)
 ai_future: Optional[Future] = None
@@ -652,8 +659,38 @@ def broadcast_lobby():
         lan_host.broadcast(lobby_payload())
 
 
+def draw_ambient_motion():
+    now = pygame.time.get_ticks()
+    layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    for particle in ambient_particles:
+        x, y, speed, radius, phase = particle
+        y -= speed
+        x += math.sin(now * 0.0007 + phase) * 0.12
+        if y < -8:
+            y = HEIGHT + 8
+            x = random.uniform(0, WIDTH)
+        particle[0], particle[1] = x, y
+        alpha = int(28 + 22 * (0.5 + 0.5 * math.sin(now * 0.0015 + phase)))
+        pygame.draw.circle(layer, (137, 190, 255, alpha), (int(x), int(y)), radius)
+    screen.blit(layer, (0, 0))
+
+
+def draw_turn_flash():
+    global last_visual_turn, turn_flash_started
+    if game.turn != last_visual_turn:
+        last_visual_turn = game.turn
+        turn_flash_started = pygame.time.get_ticks()
+    elapsed = pygame.time.get_ticks() - turn_flash_started
+    if elapsed < 800:
+        alpha = int(90 * (1 - elapsed / 800))
+        layer = pygame.Surface((376, 110), pygame.SRCALPHA)
+        pygame.draw.rect(layer, (*game.player.color, alpha), layer.get_rect(), 5, border_radius=14)
+        screen.blit(layer, (1122, 168 + game.turn * 118))
+
+
 def render_setup():
     screen.fill(BG)
+    draw_ambient_motion()
     pygame.draw.circle(screen, (40, 65, 96), (1260, 100), 430)
     pygame.draw.circle(screen, (46, 39, 72), (180, 900), 400)
     text("SPLENDOR", (WIDTH // 2, 92), TITLE, GOLD, "center")
@@ -697,7 +734,9 @@ def render_setup():
 
 def render_lobby():
     screen.fill(BG)
-    pygame.draw.circle(screen, (40, 65, 96), (1250, 80), 430)
+    draw_ambient_motion()
+    pulse = int(18 * (0.5 + 0.5 * math.sin(pygame.time.get_ticks() * 0.003)))
+    pygame.draw.circle(screen, (40 + pulse, 65 + pulse, 96 + pulse), (1250, 80), 430)
     text("联机大厅", (WIDTH // 2, 82), TITLE, GOLD, "center")
     role = "房主" if network_mode == "host" else "客人"
     text(f"{role} · {lobby_status}", (WIDTH // 2, 128), SMALL, MUTED, "center")
@@ -730,6 +769,7 @@ def render_lobby():
 
 def render():
     screen.fill(BG)
+    draw_ambient_motion()
     pygame.draw.circle(screen, (29, 47, 72), (WIDTH - 100, -10), 270)
     pygame.draw.circle(screen, (37, 54, 78), (170, HEIGHT + 80), 330)
     text("SPLENDOR", (38, 27), TITLE, GOLD)
@@ -774,6 +814,7 @@ def render():
     text("玩家状态", (1122, 132), FONT)
     for i, player in enumerate(game.players):
         draw_player_panel(player, pygame.Rect(1122, 168 + i * 118, 376, 110), i == game.turn)
+    draw_turn_flash()
 
     active = game.player
     hidden = (network_mode != "local" and game.turn != local_seat) or (network_mode == "local" and game.turn in game.ai_seats)
