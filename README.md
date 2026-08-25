@@ -33,6 +33,19 @@ export SPLENDOR_AI_MODEL="模型名称"
 
 设备需位于同一局域网；若系统防火墙询问是否允许 Python 接收入站连接，请选择允许。
 
+## 项目结构
+
+- `main.py`：桌面程序入口
+- `app.py`：Pygame 界面、输入与会话协调
+- `game_engine.py`：无 UI 的游戏模型和规则
+- `game_ai.py`：合法动作、策略观测和动作执行
+- `ai_player.py`：团队启发式与生成式模型策略
+- `state_codec.py`：联机状态序列化和隐私过滤
+- `network.py`：局域网 TCP 传输
+- `rl/`：PPO 环境、策略协议及模型适配器
+
+`rl.environment.SplendorEnv` 可在不启动 Pygame 的情况下执行 `reset()`、`legal_actions()`、`step()`，为后续自博弈和 PPO 训练提供稳定接口。PPO 依赖为可选项，不影响正常游戏运行。
+
 ## 操作
 
 - 点击左侧彩色宝石选择：可拿 3 枚不同色，或在该颜色库存不少于 4 时双击同色拿 2 枚；然后点击“确认拿取”。
