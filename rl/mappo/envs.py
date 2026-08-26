@@ -73,6 +73,7 @@ class SplendorMAEnv:
         return self._observe()
 
     def _observe(self):
+        self._skip_empty_turns()
         obs = observation(self.game)
         local = encode_observation(obs)            # actor view (global encoded)
         gstate = local.copy()                       # critic uses same encoded global
@@ -87,6 +88,26 @@ class SplendorMAEnv:
         }
         return local, gstate, mask, info
 
+    def _skip_empty_turns(self):
+        """Advance past seats that have no legal action.
+
+        Splendor can reach a dead state where the acting seat has nothing to do
+        (cards exhausted and an empty bank). Those seats pass automatically. If
+        every seat is stuck the game ends and the leader on points wins, so the
+        environment never exposes an all-zero action mask while a game runs.
+        """
+        if self.game is None or self.game.phase == "over":
+            return
+        skipped = 0
+        limit = self.n_players * 2 + 4
+        while self.game.phase != "over" and not legal_actions(self.game):
+            if skipped >= self.n_players:
+                self.game.round_end = True
+            self.game.finish_turn()
+            skipped += 1
+            if skipped > limit:
+                break
+
     def step(self, slot: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, bool, Dict[str, Any]]:
         """Advance one agent-step using a chosen action *slot*.
 
@@ -97,6 +118,12 @@ class SplendorMAEnv:
         if self.game is None:
             raise RuntimeError("reset() before step()")
         legal = legal_actions(self.game)
+        if not legal:
+            # defensive: the acting seat has nothing to do, so this step is a pass
+            self.game.finish_turn()
+            local, gstate, mask, info = self._observe()
+            info["terminal_rewards"] = [0.0] * self.n_players
+            return local, gstate, mask, 0.0, self.game.phase == "over", info
         action_id = slot_to_action_id(slot, legal)
         acting_seat = self.game.turn
         acting_team = acting_seat % 2 if self.team_mode else None
@@ -116,6 +143,7 @@ class SplendorMAEnv:
         )
         reward = float(after - before)
 
+        local, gstate, mask, info = self._observe()
         terminated = self.game.phase == "over"
         terminal_rewards = [0.0] * self.n_players
         if terminated:
@@ -128,7 +156,6 @@ class SplendorMAEnv:
                 winner_seat = self.game.players.index(self.game.winner)
                 terminal_rewards = [10.0 if seat == winner_seat else -10.0 for seat in range(self.n_players)]
 
-        local, gstate, mask, info = self._observe()
         info["terminal_rewards"] = terminal_rewards
         return local, gstate, mask, reward, terminated, info
 

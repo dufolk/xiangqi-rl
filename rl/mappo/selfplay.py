@@ -49,11 +49,14 @@ class SelfPlayArena:
         return ac
 
     @torch.no_grad()
-    def _act(self, ac, obs, agent_id, mask):
+    def _act(self, ac, obs, agent_id, mask, deterministic: bool = False):
         o = torch.as_tensor(obs, device=self.device).float()[None]
         aid = torch.as_tensor([agent_id], device=self.device, dtype=torch.long)
         m = torch.as_tensor(mask, device=self.device).float()[None]
         logits = ac.actor(o, aid, m)
+        logits = logits.masked_fill(m <= 0, float("-inf"))
+        if deterministic:
+            return int(logits.argmax(dim=-1).item())
         dist = torch.distributions.Categorical(logits=logits)
         return int(dist.sample().cpu().numpy()[0])
 
@@ -61,6 +64,92 @@ class SelfPlayArena:
     def _random_action(mask):
         legal = np.where(mask > 0.5)[0]
         return int(np.random.choice(legal)) if len(legal) else 0
+
+    def match_score(self, state_a: dict, state_b: dict, seed_offset: int = 0) -> float:
+        """Return model A's score in a side-balanced deterministic match.
+
+        In standard mode model A occupies seat 0 for half the games and seats
+        1..3 for the other half. In team mode it alternates between the even and
+        odd seat teams. This makes the result suitable for Elo updates.
+        """
+        actor_a = self._make_actor(state_a)
+        actor_b = self._make_actor(state_b)
+        score_a = 0.0
+        for game_index in range(self.n_games):
+            a_starts = game_index % 2 == 0
+            env = SplendorMAEnv(
+                team_mode=self.team_mode,
+                target_score=self.target_score,
+                seed=(self.seed + seed_offset) * 1000 + game_index,
+            )
+            obs, _, mask, info = env.reset()
+            while True:
+                acting = int(info["acting_agent"])
+                if self.team_mode:
+                    a_controls = (acting % 2 == 0) == a_starts
+                else:
+                    a_controls = (acting == 0) == a_starts
+                actor = actor_a if a_controls else actor_b
+                action = self._act(actor, obs, acting, mask, deterministic=True)
+                obs, _, mask, _, terminated, info = env.step(action)
+                if terminated:
+                    break
+
+            if self.team_mode:
+                a_team = 0 if a_starts else 1
+                if env.game.winner_team == a_team:
+                    score_a += 1.0
+            else:
+                winner_seat = env.game.players.index(env.game.winner)
+                a_won = (winner_seat == 0) == a_starts
+                score_a += float(a_won)
+        return score_a / max(1, self.n_games)
+
+    def pool_score(self, state_a: dict, opponent_pool: List[dict]) -> float:
+        """Return model A's side-balanced win rate against a pool of opponents.
+
+        Each opponent is faced for an equal share of games, with side alternation
+        so that local seat advantage does not bias the score. Returns 0.0 when the
+        pool is empty (nothing to measure against).
+        """
+        if not opponent_pool:
+            return 0.0
+        actor_a = self._make_actor(state_a)
+        opp_actors = [self._make_actor(state) for state in opponent_pool]
+        score_a = 0.0
+        total_games = self.n_games * len(opp_actors)
+        game_index = 0
+        for opp_index, opp_actor in enumerate(opp_actors):
+            for _ in range(self.n_games):
+                a_starts = game_index % 2 == 0
+                env = SplendorMAEnv(
+                    team_mode=self.team_mode,
+                    target_score=self.target_score,
+                    seed=(self.seed + opp_index) * 1000 + game_index,
+                )
+                obs, _, mask, info = env.reset()
+                while True:
+                    acting = int(info["acting_agent"])
+                    if self.team_mode:
+                        a_controls = (acting % 2 == 0) == a_starts
+                    else:
+                        a_controls = (acting == 0) == a_starts
+                    actor = actor_a if a_controls else opp_actor
+                    action = self._act(actor, obs, acting, mask, deterministic=True)
+                    obs, _, mask, _, terminated, info = env.step(action)
+                    if terminated:
+                        break
+
+                if self.team_mode:
+                    a_team = 0 if a_starts else 1
+                    if env.game.winner_team == a_team:
+                        score_a += 1.0
+                else:
+                    winner_seat = env.game.players.index(env.game.winner)
+                    a_won = (winner_seat == 0) == a_starts
+                    score_a += float(a_won)
+                game_index += 1
+        return score_a / max(1, total_games)
 
     def evaluate(
         self,
@@ -85,6 +174,8 @@ class SelfPlayArena:
         lengths = []
 
         rng = random.Random(self.seed)
+
+        # --- main loop: current policy vs pool / random (as before) ---
         for g in range(self.n_games):
             env = SplendorMAEnv(team_mode=self.team_mode,
                                 target_score=self.target_score,
@@ -126,6 +217,38 @@ class SelfPlayArena:
                     scores_sum[seat] += game.players[seat].points
             lengths.append(steps)
 
+        # --- symmetric self-play: every seat uses the CURRENT policy ---
+        # This detects seat/position bias: with a perfectly symmetric policy all
+        # seats should win ~1/n_agents of the time.
+        selfplay_seat_wins = [0] * self.n_agents
+        selfplay_lengths: List[int] = []
+        selfplay_scores: List[float] = []
+        for g in range(self.n_games):
+            env = SplendorMAEnv(team_mode=self.team_mode,
+                                target_score=self.target_score,
+                                seed=self.seed * 1000 + 7 * g + 1)
+            obs, gstate, mask, info = env.reset()
+            steps = 0
+            done = False
+            while not done:
+                acting = info["acting_agent"]
+                action = self._act(current_ac, obs, acting, mask)
+                obs, gstate, mask, reward, terminated, info = env.step(action)
+                steps += 1
+                if terminated:
+                    done = True
+            game = env.game
+            if self.team_mode:
+                selfplay_seat_wins[game.winner_team] += 1
+                for seat in range(self.n_agents):
+                    selfplay_scores.append(game.team_score(seat % 2))
+            else:
+                wseat = game.players.index(game.winner)
+                selfplay_seat_wins[wseat] += 1
+                for seat in range(self.n_agents):
+                    selfplay_scores.append(game.players[seat].points)
+            selfplay_lengths.append(steps)
+
         stats: Dict[str, float] = {}
         n = max(1, self.n_games)
         if self.team_mode:
@@ -138,4 +261,10 @@ class SelfPlayArena:
             stats["win_rate_seat0"] = seat_wins[0] / n
             stats["mean_score"] = sum(scores_sum) / (n * self.n_agents)
         stats["mean_length"] = float(np.mean(lengths)) if lengths else 0.0
+
+        # symmetric self-play win rates (key self-play health metric)
+        for s in range(self.n_agents):
+            stats[f"selfplay_win_seat{s}"] = selfplay_seat_wins[s] / n
+        stats["selfplay_mean_score"] = float(np.mean(selfplay_scores)) if selfplay_scores else 0.0
+        stats["selfplay_mean_length"] = float(np.mean(selfplay_lengths)) if selfplay_lengths else 0.0
         return stats

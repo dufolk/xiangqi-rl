@@ -39,16 +39,17 @@ def _load_latest_weights(actor_critic, weight_queue, current_version):
     return current_version
 
 
-def assign_terminal_rewards(rewards, agent_ids, episode_ids, episode_id, terminal_rewards):
-    """Attach each seat's terminal reward to its final action in the episode segment."""
-    for seat, terminal_reward in enumerate(terminal_rewards):
+def assign_terminal_rewards(rewards, agent_ids, episode_ids, episode_id, terminal_rewards, seats=None):
+    """Attach each trainable seat's terminal reward to its final action."""
+    trainable_seats = range(len(terminal_rewards)) if seats is None else seats
+    for seat in trainable_seats:
         matching = [
             index for index in range(len(rewards) - 1, -1, -1)
             if episode_ids[index] == episode_id and agent_ids[index] == seat
         ]
         if not matching:
             raise RuntimeError(f"terminal segment is missing seat {seat} trajectory")
-        rewards[matching[0]] += float(terminal_reward)
+        rewards[matching[0]] += float(terminal_rewards[seat])
 
 
 def worker_loop(
@@ -59,9 +60,12 @@ def worker_loop(
     horizon: int,
     initial_weights: bytes,
     initial_version: int,
+    initial_opponents: bytes,
     weight_queue: "mp.Queue",
+    opponent_queue: "mp.Queue",
     data_queue: "mp.Queue",
     seed_base: int,
+    history_opponent_probability: float,
     stop_event: "mp.Event",
 ):
     """Collect fixed-horizon segments while preserving environment continuity."""
@@ -73,7 +77,29 @@ def worker_loop(
     actor_critic.load_state_dict(pickle.loads(initial_weights))
     actor_critic.eval()
     policy_version = int(initial_version)
+    opponent_actors = []
 
+    def load_opponents(blob):
+        actors = []
+        for state_dict in pickle.loads(blob):
+            opponent = ActorCritic(OBS_DIM, ACTION_SPACE, n_agents, OBS_DIM)
+            opponent.load_state_dict(state_dict)
+            opponent.eval()
+            actors.append(opponent)
+        return actors
+
+    def refresh_opponents():
+        nonlocal opponent_actors
+        latest = None
+        while True:
+            try:
+                latest = opponent_queue.get_nowait()
+            except queue.Empty:
+                break
+        if latest is not None:
+            opponent_actors = load_opponents(latest[1])
+
+    opponent_actors = load_opponents(initial_opponents)
     env = SplendorMAEnv(
         team_mode=team_mode,
         target_score=target_score,
@@ -85,6 +111,24 @@ def worker_loop(
     episode_id = 0
     episode_reward = 0.0
     episode_length = 0
+    history_game = False
+    opponents_by_seat = {}
+
+    def choose_episode_policies():
+        nonlocal history_game, opponents_by_seat
+        history_game = bool(opponent_actors) and rng.random_sample() < history_opponent_probability
+        opponents_by_seat = {}
+        if history_game:
+            if team_mode:
+                opponent = opponent_actors[int(rng.randint(len(opponent_actors)))]
+                opponents_by_seat = {1: opponent, 3: opponent}
+            else:
+                opponents_by_seat = {
+                    seat: opponent_actors[int(rng.randint(len(opponent_actors)))]
+                    for seat in range(1, n_agents)
+                }
+
+    choose_episode_policies()
 
     while not stop_event.is_set():
         policy_version = _load_latest_weights(actor_critic, weight_queue, policy_version)
@@ -99,28 +143,32 @@ def worker_loop(
         segment_steps = 0
         while not stop_event.is_set():
             acting = int(info["acting_agent"])
+            current_controls = not history_game or (acting % 2 == 0 if team_mode else acting == 0)
+            acting_actor = actor_critic if current_controls else opponents_by_seat[acting]
             with torch.no_grad():
                 obs_tensor = torch.as_tensor(obs[None], dtype=torch.float32)
                 mask_tensor = torch.as_tensor(mask[None], dtype=torch.float32)
                 seat_tensor = torch.as_tensor([acting], dtype=torch.long)
-                logits = actor_critic.actor(obs_tensor, seat_tensor, mask_tensor)
+                logits = acting_actor.actor(obs_tensor, seat_tensor, mask_tensor)
                 distribution = torch.distributions.Categorical(logits=logits)
                 action = int(distribution.sample().item())
-                logp = float(distribution.log_prob(torch.as_tensor(action)).item())
-                seat_values = actor_critic.critic(torch.as_tensor(global_state[None], dtype=torch.float32))
-                value = float(seat_values[0, acting].item())
+                if current_controls:
+                    logp = float(distribution.log_prob(torch.as_tensor(action)).item())
+                    seat_values = actor_critic.critic(torch.as_tensor(global_state[None], dtype=torch.float32))
+                    value = float(seat_values[0, acting].item())
 
             next_obs, next_global_state, next_mask, reward, terminated, next_info = env.step(action)
-            rollout["obs"].append(obs)
-            rollout["global_state"].append(global_state)
-            rollout["agent_id"].append(acting)
-            rollout["action"].append(action)
-            rollout["logp"].append(logp)
-            rollout["reward"].append(float(reward))
-            rollout["mask"].append(mask)
-            rollout["value"].append(value)
-            rollout["done"].append(bool(terminated))
-            rollout["episode_id"].append(episode_id)
+            if current_controls:
+                rollout["obs"].append(obs)
+                rollout["global_state"].append(global_state)
+                rollout["agent_id"].append(acting)
+                rollout["action"].append(action)
+                rollout["logp"].append(logp)
+                rollout["reward"].append(float(reward))
+                rollout["mask"].append(mask)
+                rollout["value"].append(value)
+                rollout["done"].append(bool(terminated))
+                rollout["episode_id"].append(episode_id)
             episode_reward += float(reward)
             episode_length += 1
             segment_steps += 1
@@ -128,9 +176,12 @@ def worker_loop(
             obs, global_state, mask, info = next_obs, next_global_state, next_mask, next_info
             if terminated:
                 terminal_rewards = next_info.get("terminal_rewards", [0.0] * n_agents)
+                trainable_seats = range(n_agents)
+                if history_game:
+                    trainable_seats = (0, 2) if team_mode else (0,)
                 assign_terminal_rewards(
                     rollout["reward"], rollout["agent_id"], rollout["episode_id"],
-                    episode_id, terminal_rewards,
+                    episode_id, terminal_rewards, seats=trainable_seats,
                 )
                 episode_reward += sum(float(value) for value in terminal_rewards)
                 bootstrap_values[str(episode_id)] = [0.0] * n_agents
@@ -141,7 +192,9 @@ def worker_loop(
                 episode_id += 1
                 episode_reward = 0.0
                 episode_length = 0
+                refresh_opponents()
                 obs, global_state, mask, info = env.reset(seed=int(rng.randint(0, 2**30)))
+                choose_episode_policies()
 
             if segment_steps >= horizon and env.game.turn == 0 and env.game.phase == "action":
                 break
@@ -181,6 +234,7 @@ class DistributedCollector:
         horizon: int = 64,
         seed: int = 1234,
         device: str = "cpu",
+        history_opponent_probability: float = 0.5,
     ):
         if n_workers is None:
             n_workers = max(1, (os.cpu_count() or 4) - 1)
@@ -190,24 +244,31 @@ class DistributedCollector:
         self.target_score = target_score
         self.horizon = horizon
         self.seed = seed
+        if not 0.0 <= history_opponent_probability <= 1.0:
+            raise ValueError("history_opponent_probability must be in [0, 1]")
         self.device = device
+        self.history_opponent_probability = float(history_opponent_probability)
         self.ctx = mp.get_context("spawn")
         self.weight_queues = [self.ctx.Queue(maxsize=1) for _ in range(n_workers)]
+        self.opponent_queues = [self.ctx.Queue(maxsize=1) for _ in range(n_workers)]
         self.data_queue = self.ctx.Queue(maxsize=n_workers * 4)
         self.stop_event = self.ctx.Event()
         self.workers: List[mp.Process] = []
         self.policy_version = 0
+        self.opponent_version = 0
 
-    def start(self, initial_state_dict):
+    def start(self, initial_state_dict, opponent_pool=None):
         self.stop_event.clear()
         initial_blob = pickle.dumps(_cpu_state_dict(initial_state_dict))
+        initial_opponents = pickle.dumps([_cpu_state_dict(state) for state in (opponent_pool or [])])
         for worker_id in range(self.n_workers):
             process = self.ctx.Process(
                 target=worker_loop,
                 args=(
                     worker_id, self.n_agents, self.team_mode, self.target_score,
-                    self.horizon, initial_blob, self.policy_version,
-                    self.weight_queues[worker_id], self.data_queue, self.seed,
+                    self.horizon, initial_blob, self.policy_version, initial_opponents,
+                    self.weight_queues[worker_id], self.opponent_queues[worker_id],
+                    self.data_queue, self.seed, self.history_opponent_probability,
                     self.stop_event,
                 ),
                 daemon=True,
@@ -259,12 +320,37 @@ class DistributedCollector:
                 process.terminate()
         self.workers.clear()
 
+    def set_opponent_pool(self, pool: list):
+        """Broadcast a new historical-opponent pool to all rollout workers.
+
+        `pool` is a list of CPU state_dicts (may be empty). Workers pick a
+        random entry per episode to drive fictitious self-play. The payload is
+        serialized exactly like `start()`'s `initial_opponents`:
+        (version, pickle.dumps(list[state_dict])).
+        """
+        self.opponent_version += 1
+        blob = pickle.dumps([_cpu_state_dict(state) for state in (pool or [])])
+        message = (self.opponent_version, blob)
+        for q in self.opponent_queues:
+            try:
+                while True:
+                    q.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                q.put_nowait(message)
+            except queue.Full:
+                pass
+
     def train_loop(
         self,
         mappo,
         total_timesteps: int,
         rollouts_per_update: int = 8,
         n_epochs: int = 4,
+        minibatch_size: int = 1024,
+        opponent_pool=None,
+        on_update=None,
         log_fn=None,
         save_path: str = None,
         save_every: int = 10,
@@ -273,7 +359,7 @@ class DistributedCollector:
         eval_every: int = 10,
         tag: str = "train",
     ):
-        self.start(mappo.ac.state_dict())
+        self.start(mappo.ac.state_dict(), opponent_pool=opponent_pool)
         collected = 0
         update_count = 0
         episode_rewards: List[float] = []
@@ -292,10 +378,21 @@ class DistributedCollector:
                 merged = concatenate_rollouts(payloads)
                 rewards = np.concatenate([payload["reward"] for payload in payloads])
                 batch = to_tensors(merged, mappo.device)
-                metrics = mappo.update(batch, n_epochs=n_epochs)
+                metrics = mappo.update(batch, n_epochs=n_epochs, minibatch_size=minibatch_size)
                 collected += len(rewards)
                 update_count += 1
-                self.broadcast_weights(mappo.ac.state_dict())
+                current_state_dict = mappo.ac.state_dict()
+                self.broadcast_weights(current_state_dict)
+                stop_requested = False
+                if on_update is not None:
+                    callback_result = on_update(current_state_dict, collected, update_count)
+                    if isinstance(callback_result, dict):
+                        updated_pool = callback_result.get("opponent_pool")
+                        stop_requested = bool(callback_result.get("stop", False))
+                    else:
+                        updated_pool = callback_result
+                    if updated_pool is not None:
+                        self.set_opponent_pool(updated_pool)
 
                 if tb_writer is not None:
                     last = metrics[-1] if metrics else {}
@@ -324,6 +421,9 @@ class DistributedCollector:
                     log_fn(update_count, collected, metrics[-1] if metrics else {})
                 if save_path and update_count % save_every == 0:
                     mappo.save(save_path)
+                if stop_requested:
+                    print(f"[train] stop requested after update {update_count} at {collected} steps")
+                    break
 
             if save_path:
                 mappo.save(save_path)

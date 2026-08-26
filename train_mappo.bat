@@ -14,8 +14,9 @@ set TIMESTEPS=%2
 if "%TIMESTEPS%"=="" set TIMESTEPS=2000000
 
 set WORKERS=7
-set HORIZON=64
-set ROLLOUTS=8
+set HORIZON=2048
+set ROLLOUTS=16
+set MINIBATCH=32768
 set EPOCHS=4
 set EVAL_EVERY=10
 set EVAL_GAMES=32
@@ -31,7 +32,7 @@ if "%MODE%"=="team" (
     set TARGET=15
 )
 
-echo [train] mode=%MODE% timesteps=%TIMESTEPS% target=%TARGET% workers=%WORKERS%
+echo [train] mode=%MODE% timesteps=%TIMESTEPS% target=%TARGET% workers=%WORKERS% horizon=%HORIZON% rollouts=%ROLLOUTS% minibatch=%MINIBATCH%
 
 set SDL_VIDEODRIVER=dummy
 python -m rl.mappo.main_train ^
@@ -41,6 +42,7 @@ python -m rl.mappo.main_train ^
     --target-score %TARGET% ^
     --horizon %HORIZON% ^
     --rollouts-per-update %ROLLOUTS% ^
+    --minibatch-size %MINIBATCH% ^
     --epochs %EPOCHS% ^
     --eval-every %EVAL_EVERY% ^
     --eval-games %EVAL_GAMES% ^

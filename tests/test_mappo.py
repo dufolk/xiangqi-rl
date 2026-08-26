@@ -144,6 +144,49 @@ class MAPPOEncodingTests(unittest.TestCase):
         finally:
             collector.stop()
 
+    def test_historical_opponents_only_emit_current_policy_trajectories(self):
+        actor_critic = ActorCritic(OBS_DIM, ACTION_SPACE, 4, OBS_DIM)
+        state_dict = actor_critic.state_dict()
+        for team_mode, expected_seats in ((False, {0}), (True, {0, 2})):
+            with self.subTest(team_mode=team_mode):
+                collector = DistributedCollector(
+                    n_workers=1, horizon=4, seed=31, team_mode=team_mode,
+                    history_opponent_probability=1.0,
+                )
+                try:
+                    collector.start(state_dict, opponent_pool=[state_dict])
+                    payload = collector.collect(timeout=30)
+                    self.assertIsNotNone(payload)
+                    self.assertEqual(set(payload["agent_id"].tolist()), expected_seats)
+                finally:
+                    collector.stop()
+
+    def test_elo_convergence_requires_a_stable_full_window(self):
+        from rl.mappo.history import elo_has_converged
+
+        self.assertFalse(elo_has_converged([1000.0, 1002.0], window=3, threshold=25.0))
+        self.assertFalse(elo_has_converged([1000.0, 1015.0, 1060.0], window=3, threshold=25.0))
+        self.assertTrue(elo_has_converged([1000.0, 1003.0, 998.0, 1001.0], window=3, threshold=25.0))
+        self.assertFalse(elo_has_converged([1000.0, 1001.0, 1002.0], window=0, threshold=25.0))
+
+    def test_train_loop_honors_stop_callback(self):
+        from rl.mappo.algo import MAPPO
+
+        mappo = MAPPO(OBS_DIM, ACTION_SPACE, 4, OBS_DIM, device=torch.device("cpu"))
+        collector = DistributedCollector(n_workers=1, horizon=4, seed=47)
+        callback_updates = []
+
+        def stop_after_first_update(_state_dict, collected, update):
+            callback_updates.append((collected, update))
+            return {"stop": True}
+
+        collector.train_loop(
+            mappo, total_timesteps=10_000, rollouts_per_update=1, n_epochs=1,
+            on_update=stop_after_first_update,
+        )
+        self.assertEqual(len(callback_updates), 1)
+        self.assertEqual(callback_updates[0][1], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
