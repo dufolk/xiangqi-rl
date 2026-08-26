@@ -57,7 +57,8 @@ class MAPPO:
         dist = Categorical(logits=logits)
         action = dist.probs.argmax(dim=-1) if deterministic else dist.sample()
         logp = dist.log_prob(action)
-        value = self.ac.critic(self._global_from_obs(obs))
+        values = self.ac.critic(self._global_from_obs(obs))
+        value = values.gather(1, agent_id.unsqueeze(-1)).squeeze(-1)
         return action.cpu().numpy(), logp.cpu().numpy(), value.cpu().numpy(), dist
 
     def _global_from_obs(self, obs_batch):
@@ -69,16 +70,21 @@ class MAPPO:
         return obs_batch  # placeholder; real global passed in evaluate()
 
     @torch.no_grad()
-    def value_only(self, global_state):
+    def value_only(self, global_state, agent_id=None):
         g = torch.as_tensor(global_state, device=self.device).float()
-        return self.ac.critic(g).cpu().numpy()
+        values = self.ac.critic(g)
+        if agent_id is not None:
+            seats = torch.as_tensor(agent_id, device=self.device, dtype=torch.long)
+            values = values.gather(1, seats.unsqueeze(-1)).squeeze(-1)
+        return values.cpu().numpy()
 
     def evaluate(self, global_state, obs, agent_id, mask, action):
         logits = self.ac.actor(obs, agent_id, mask)
         dist = Categorical(logits=logits)
         logp = dist.log_prob(action)
         entropy = dist.entropy()
-        value = self.ac.critic(global_state).squeeze(-1)
+        values = self.ac.critic(global_state)
+        value = values.gather(1, agent_id.unsqueeze(-1)).squeeze(-1)
         return logp, entropy, value
 
     def update(self, batch: dict, n_epochs: int = 4, minibatch_size: int = 1024):

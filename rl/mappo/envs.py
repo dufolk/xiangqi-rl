@@ -117,15 +117,19 @@ class SplendorMAEnv:
         reward = float(after - before)
 
         terminated = self.game.phase == "over"
+        terminal_rewards = [0.0] * self.n_players
         if terminated:
-            won = (
-                self.game.winner_team == acting_team
-                if self.team_mode
-                else self.game.winner is self.game.players[acting_seat]
-            )
-            reward += 10.0 if won else -10.0
+            if self.team_mode:
+                terminal_rewards = [
+                    10.0 if seat % 2 == self.game.winner_team else -10.0
+                    for seat in range(self.n_players)
+                ]
+            else:
+                winner_seat = self.game.players.index(self.game.winner)
+                terminal_rewards = [10.0 if seat == winner_seat else -10.0 for seat in range(self.n_players)]
 
         local, gstate, mask, info = self._observe()
+        info["terminal_rewards"] = terminal_rewards
         return local, gstate, mask, reward, terminated, info
 
 

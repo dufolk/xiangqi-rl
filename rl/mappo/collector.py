@@ -1,42 +1,54 @@
-"""Headless distributed rollout collector (multiprocessing).
+"""Distributed, trajectory-safe MAPPO rollout collection.
 
-Architecture (maps to "distributed data collection, centralized training"):
-
-    [ Worker 0 (CPU) ]  -> rollout batch ->
-    [ Worker 1 (CPU) ]  -> rollout batch ->  [ Queue ] -> [ Trainer (GPU/RTX5070) ]
-    [   ...           ]                      collects ->   MAPPO.update()
-            ^                                         |
-            |  weights broadcast (periodic) ----------+
-
-- Each worker runs its own SplendorMAEnv instance headlessly (no pygame/display).
-- Workers do *inference only* on CPU with a local copy of the policy; weights
-  are pushed from the trainer periodically via a shared dict / queue.
-- The trainer (main process) owns the GPU model, performs MAPPO updates, and
-  pushes new weights back to workers.
-- Fully headless: set environment variables SDL_VIDEODRIVER=dummy if pygame
-  ever touches display (it does not in the game_ai path used here).
-
-This design lets you scale collection across all CPU cores while keeping the
-single 5070 busy on training. It is process-based so it is safe with pygame
-and CPython threads, and inherently "distributed" (independent processes).
+Each CPU worker owns one persistent environment and receives model weights on an
+independent latest-only control queue. Rollouts are cut at ``horizon`` without
+resetting the game; non-terminal cuts bootstrap from the next canonical global
+state. GAE is computed per worker payload, episode and seat before aggregation.
 """
 
 import multiprocessing as mp
 import os
 import pickle
+import queue
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 
-from .algo import MAPPO
+from .buffer import concatenate_rollouts, to_tensors
 from .encoders import ACTION_SPACE, OBS_DIM
 from .envs import SplendorMAEnv
 
 
-def _build_global(obs_per_agent: List[np.ndarray]) -> np.ndarray:
-    """Concatenate per-agent obs into joint global state (CTDE critic input)."""
-    return np.concatenate(obs_per_agent, axis=-1)
+def _cpu_state_dict(state_dict):
+    return {key: value.detach().cpu().clone() for key, value in state_dict.items()}
+
+
+def _load_latest_weights(actor_critic, weight_queue, current_version):
+    latest = None
+    while True:
+        try:
+            latest = weight_queue.get_nowait()
+        except queue.Empty:
+            break
+    if latest is not None:
+        version, blob = latest
+        actor_critic.load_state_dict(pickle.loads(blob))
+        actor_critic.eval()
+        return int(version)
+    return current_version
+
+
+def assign_terminal_rewards(rewards, agent_ids, episode_ids, episode_id, terminal_rewards):
+    """Attach each seat's terminal reward to its final action in the episode segment."""
+    for seat, terminal_reward in enumerate(terminal_rewards):
+        matching = [
+            index for index in range(len(rewards) - 1, -1, -1)
+            if episode_ids[index] == episode_id and agent_ids[index] == seat
+        ]
+        if not matching:
+            raise RuntimeError(f"terminal segment is missing seat {seat} trajectory")
+        rewards[matching[0]] += float(terminal_reward)
 
 
 def worker_loop(
@@ -45,118 +57,120 @@ def worker_loop(
     team_mode: bool,
     target_score: int,
     horizon: int,
-    weight_q: "mp.Queue",      # trainer -> worker weights (pickle of state_dict)
-    data_q: "mp.Queue",        # worker -> trainer rollouts
+    initial_weights: bytes,
+    initial_version: int,
+    weight_queue: "mp.Queue",
+    data_queue: "mp.Queue",
     seed_base: int,
     stop_event: "mp.Event",
 ):
-    """Worker process: collect `horizon` agent-steps then send a rollout."""
-    # Ensure headless
+    """Collect fixed-horizon segments while preserving environment continuity."""
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     import torch
-    # local CPU model
     from .networks import ActorCritic
-    ac = ActorCritic(OBS_DIM, ACTION_SPACE, n_agents, OBS_DIM * n_agents)
-    ac.eval()
 
-    env = SplendorMAEnv(team_mode=team_mode, target_score=target_score,
-                        seed=seed_base + worker_id)
+    actor_critic = ActorCritic(OBS_DIM, ACTION_SPACE, n_agents, OBS_DIM)
+    actor_critic.load_state_dict(pickle.loads(initial_weights))
+    actor_critic.eval()
+    policy_version = int(initial_version)
+
+    env = SplendorMAEnv(
+        team_mode=team_mode,
+        target_score=target_score,
+        seed=seed_base + worker_id,
+        n_players=n_agents,
+    )
     rng = np.random.RandomState(seed_base * 1000 + worker_id)
-
-    local_buffers = {
-        "obs": [], "global_state": [], "agent_id": [], "action": [],
-        "logp": [], "reward": [], "mask": [], "value": [], "done": [],
-    }
+    obs, global_state, mask, info = env.reset(seed=int(rng.randint(0, 2**30)))
+    episode_id = 0
+    episode_reward = 0.0
+    episode_length = 0
 
     while not stop_event.is_set():
-        # pull latest weights if available (non-blocking)
-        while not weight_q.empty():
-            try:
-                sd = weight_q.get_nowait()
-                ac.load_state_dict(pickle.loads(sd))
-                ac.eval()
-            except Exception:
+        policy_version = _load_latest_weights(actor_critic, weight_queue, policy_version)
+        rollout = {
+            "obs": [], "global_state": [], "agent_id": [], "action": [],
+            "logp": [], "reward": [], "mask": [], "value": [],
+            "done": [], "episode_id": [],
+        }
+        bootstrap_values = {}
+        episode_summaries = []
+
+        segment_steps = 0
+        while not stop_event.is_set():
+            acting = int(info["acting_agent"])
+            with torch.no_grad():
+                obs_tensor = torch.as_tensor(obs[None], dtype=torch.float32)
+                mask_tensor = torch.as_tensor(mask[None], dtype=torch.float32)
+                seat_tensor = torch.as_tensor([acting], dtype=torch.long)
+                logits = actor_critic.actor(obs_tensor, seat_tensor, mask_tensor)
+                distribution = torch.distributions.Categorical(logits=logits)
+                action = int(distribution.sample().item())
+                logp = float(distribution.log_prob(torch.as_tensor(action)).item())
+                seat_values = actor_critic.critic(torch.as_tensor(global_state[None], dtype=torch.float32))
+                value = float(seat_values[0, acting].item())
+
+            next_obs, next_global_state, next_mask, reward, terminated, next_info = env.step(action)
+            rollout["obs"].append(obs)
+            rollout["global_state"].append(global_state)
+            rollout["agent_id"].append(acting)
+            rollout["action"].append(action)
+            rollout["logp"].append(logp)
+            rollout["reward"].append(float(reward))
+            rollout["mask"].append(mask)
+            rollout["value"].append(value)
+            rollout["done"].append(bool(terminated))
+            rollout["episode_id"].append(episode_id)
+            episode_reward += float(reward)
+            episode_length += 1
+            segment_steps += 1
+
+            obs, global_state, mask, info = next_obs, next_global_state, next_mask, next_info
+            if terminated:
+                terminal_rewards = next_info.get("terminal_rewards", [0.0] * n_agents)
+                assign_terminal_rewards(
+                    rollout["reward"], rollout["agent_id"], rollout["episode_id"],
+                    episode_id, terminal_rewards,
+                )
+                episode_reward += sum(float(value) for value in terminal_rewards)
+                bootstrap_values[str(episode_id)] = [0.0] * n_agents
+                episode_summaries.append({
+                    "reward": float(episode_reward),
+                    "length": int(episode_length),
+                })
+                episode_id += 1
+                episode_reward = 0.0
+                episode_length = 0
+                obs, global_state, mask, info = env.reset(seed=int(rng.randint(0, 2**30)))
+
+            if segment_steps >= horizon and env.game.turn == 0 and env.game.phase == "action":
                 break
 
-        obs, gstate, mask, info = env.reset(seed=int(rng.randint(0, 2**30)))
-        # initial global state requires all agents' obs; we approximate per-step
-        # global as the concatenation of current obs repeated across agents
-        # (the critic input dim = obs_dim * n_agents). To keep global coherent,
-        # we store the *current* obs for all agents by reusing the latest seen
-        # obs of each agent; for the first step we broadcast the single obs.
-        agent_obs_memory = [obs.copy() for _ in range(n_agents)]
+        if not rollout["obs"]:
+            continue
 
-        episode_steps = 0
-        ep_reward = 0.0
-        done = False
-        while not done and episode_steps < horizon:
-            acting = info["acting_agent"]
-            agent_obs_memory[acting] = obs.copy()
-            global_state = _build_global(agent_obs_memory)
+        active_episode = int(rollout["episode_id"][-1])
+        if active_episode not in {int(key) for key in bootstrap_values}:
+            with torch.no_grad():
+                values = actor_critic.critic(torch.as_tensor(global_state[None], dtype=torch.float32))[0]
+            bootstrap_values[str(active_episode)] = values.cpu().numpy().astype(np.float32).tolist()
 
-            # inference
-            o_t = np.asarray(obs)[None]
-            m_t = np.asarray(mask)[None]
-            aid_t = np.array([acting], dtype=np.int64)
-            logits = ac.actor(
-                torch.as_tensor(o_t, dtype=torch.float32),
-                torch.as_tensor(aid_t, dtype=torch.long),
-                torch.as_tensor(m_t, dtype=torch.float32),
-            )
-            dist = __import__("torch").distributions.Categorical(logits=logits)
-            action = dist.sample().cpu().numpy()[0]
-            logp = dist.log_prob(torch.as_tensor([int(action)])).item()
-            value = ac.critic(torch.as_tensor(global_state[None], dtype=torch.float32)).item()
+        payload = {
+            "worker_id": worker_id,
+            "policy_version": policy_version,
+            "bootstrap_values": bootstrap_values,
+            "episode_summaries": episode_summaries,
+        }
+        for key, values in rollout.items():
+            dtype = np.int64 if key in ("agent_id", "action", "episode_id") else bool if key == "done" else np.float32
+            payload[key] = np.asarray(values, dtype=dtype)
+        data_queue.put(payload)
 
-            n_obs, n_gstate, n_mask, reward, terminated, n_info = env.step(int(action))
-            ep_reward += reward
-
-            local_buffers["obs"].append(obs)
-            local_buffers["global_state"].append(global_state)
-            local_buffers["agent_id"].append(acting)
-            local_buffers["action"].append(int(action))
-            local_buffers["logp"].append(logp)
-            local_buffers["reward"].append(reward)
-            local_buffers["mask"].append(mask)
-            local_buffers["value"].append(value)
-            local_buffers["done"].append(terminated)
-
-            obs, mask, info = n_obs, n_mask, n_info
-            if terminated:
-                done = True
-            episode_steps += 1
-
-        # send rollout if non-empty
-        if local_buffers["obs"]:
-            payload = {
-                "worker_id": worker_id,
-                "obs": np.asarray(local_buffers["obs"], dtype=np.float32),
-                "global_state": np.asarray(local_buffers["global_state"], dtype=np.float32),
-                "agent_id": np.asarray(local_buffers["agent_id"], dtype=np.int64),
-                "action": np.asarray(local_buffers["action"], dtype=np.int64),
-                "logp": np.asarray(local_buffers["logp"], dtype=np.float32),
-                "reward": np.asarray(local_buffers["reward"], dtype=np.float32),
-                "mask": np.asarray(local_buffers["mask"], dtype=np.float32),
-                "value": np.asarray(local_buffers["value"], dtype=np.float32),
-                "done": np.asarray(local_buffers["done"], dtype=bool),
-            }
-            data_q.put(payload)
-            for k in local_buffers:
-                local_buffers[k].clear()
-            # episode-level summary (only meaningful when truly terminated)
-            if done:
-                data_q.put({
-                    "__episode__": worker_id,
-                    "reward": float(ep_reward),
-                    "length": int(episode_steps),
-                })
-
-    # signal exit
-    data_q.put({"__worker_done__": worker_id})
+    data_queue.put({"__worker_done__": worker_id})
 
 
 class DistributedCollector:
-    """Manages worker processes and aggregates rollouts for the trainer."""
+    """Manage rollout workers and centralized PPO updates."""
 
     def __init__(
         self,
@@ -178,70 +192,76 @@ class DistributedCollector:
         self.seed = seed
         self.device = device
         self.ctx = mp.get_context("spawn")
-
-        self.weight_q: "mp.Queue" = self.ctx.Queue(maxsize=n_workers * 2)
-        self.data_q: "mp.Queue" = self.ctx.Queue(maxsize=n_workers * 4)
+        self.weight_queues = [self.ctx.Queue(maxsize=1) for _ in range(n_workers)]
+        self.data_queue = self.ctx.Queue(maxsize=n_workers * 4)
         self.stop_event = self.ctx.Event()
         self.workers: List[mp.Process] = []
+        self.policy_version = 0
 
-    def start(self):
+    def start(self, initial_state_dict):
         self.stop_event.clear()
-        for wid in range(self.n_workers):
-            p = self.ctx.Process(
+        initial_blob = pickle.dumps(_cpu_state_dict(initial_state_dict))
+        for worker_id in range(self.n_workers):
+            process = self.ctx.Process(
                 target=worker_loop,
-                args=(wid, self.n_agents, self.team_mode, self.target_score,
-                      self.horizon, self.weight_q, self.data_q, self.seed,
-                      self.stop_event),
+                args=(
+                    worker_id, self.n_agents, self.team_mode, self.target_score,
+                    self.horizon, initial_blob, self.policy_version,
+                    self.weight_queues[worker_id], self.data_queue, self.seed,
+                    self.stop_event,
+                ),
                 daemon=True,
             )
-            p.start()
-            self.workers.append(p)
+            process.start()
+            self.workers.append(process)
 
-    def broadcast_weights(self, state_dict: dict):
-        blob = pickle.dumps(state_dict)
-        for _ in range(self.n_workers):
-            self.weight_q.put(blob)
+    def broadcast_weights(self, state_dict):
+        self.policy_version += 1
+        message = (self.policy_version, pickle.dumps(_cpu_state_dict(state_dict)))
+        for weight_queue in self.weight_queues:
+            try:
+                while True:
+                    weight_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                weight_queue.put_nowait(message)
+            except queue.Full:
+                pass
 
-    def collect(self, timeout: float = 30.0) -> Optional[Dict[str, np.ndarray]]:
-        """Fetch one rollout payload from any worker (blocking, with timeout)."""
+    def collect(self, timeout: float = 30.0) -> Optional[dict]:
         try:
-            payload = self.data_q.get(timeout=timeout)
-        except Exception:
+            payload = self.data_queue.get(timeout=timeout)
+        except queue.Empty:
             return None
-        if "__worker_done__" in payload:
-            return None
-        return payload
+        return None if "__worker_done__" in payload else payload
 
     def drain(self, max_batches: int = None, timeout: float = 5.0):
-        """Collect up to max_batches rollouts (or all currently available)."""
         batches = []
-        t0 = time.time()
-        while True:
-            if max_batches and len(batches) >= max_batches:
+        deadline = time.time() + timeout
+        while max_batches is None or len(batches) < max_batches:
+            remaining = deadline - time.time()
+            if remaining <= 0:
                 break
             try:
-                p = self.data_q.get(timeout=timeout)
-            except Exception:
+                payload = self.data_queue.get(timeout=remaining)
+            except queue.Empty:
                 break
-            if "__worker_done__" in p:
-                continue
-            batches.append(p)
-            if time.time() - t0 > timeout * 4 and not max_batches:
-                break
+            if "__worker_done__" not in payload:
+                batches.append(payload)
         return batches
 
     def stop(self):
         self.stop_event.set()
-        for p in self.workers:
-            p.join(timeout=5)
-            if p.is_alive():
-                p.terminate()
+        for process in self.workers:
+            process.join(timeout=5)
+            if process.is_alive():
+                process.terminate()
         self.workers.clear()
 
-    # convenience: train a MAPPO instance using this collector
     def train_loop(
         self,
-        mappo: "MAPPO",
+        mappo,
         total_timesteps: int,
         rollouts_per_update: int = 8,
         n_epochs: int = 4,
@@ -253,120 +273,59 @@ class DistributedCollector:
         eval_every: int = 10,
         tag: str = "train",
     ):
-        """Training loop with optional TensorBoard logging and self-play eval.
-
-        - tb_writer: torch.utils.tensorboard.SummaryWriter (or compatible).
-        - eval_fn: callable() -> Dict[str, float] returning scalar stats to log
-          (e.g. win-rate from a SelfPlayArena). Called every `eval_every` updates.
-        - tag: prefix for TensorBoard scalar names (e.g. "team" / "standard").
-        """
-        import torch
-        self.start()
+        self.start(mappo.ac.state_dict())
         collected = 0
         update_count = 0
-        ep_rewards: List[float] = []
-        ep_lengths: List[int] = []
+        episode_rewards: List[float] = []
+        episode_lengths: List[int] = []
 
-        while collected < total_timesteps:
-            batches = self.drain(max_batches=rollouts_per_update, timeout=8.0)
-            if not batches:
-                # keep training loop alive; push weights once
+        try:
+            while collected < total_timesteps:
+                payloads = self.drain(max_batches=rollouts_per_update, timeout=8.0)
+                if not payloads:
+                    continue
+                for payload in payloads:
+                    for summary in payload.get("episode_summaries", []):
+                        episode_rewards.append(summary["reward"])
+                        episode_lengths.append(summary["length"])
+
+                merged = concatenate_rollouts(payloads)
+                rewards = np.concatenate([payload["reward"] for payload in payloads])
+                batch = to_tensors(merged, mappo.device)
+                metrics = mappo.update(batch, n_epochs=n_epochs)
+                collected += len(rewards)
+                update_count += 1
                 self.broadcast_weights(mappo.ac.state_dict())
-                continue
 
-            # split episode summaries from step payloads
-            step_batches = []
-            for b in batches:
-                if "__episode__" in b:
-                    ep_rewards.append(b["reward"])
-                    ep_lengths.append(b["length"])
-                else:
-                    step_batches.append(b)
-            batches = step_batches
-            if not batches:
-                continue
+                if tb_writer is not None:
+                    last = metrics[-1] if metrics else {}
+                    tb_writer.add_scalar(f"{tag}/policy_loss", last.get("policy_loss", 0), update_count)
+                    tb_writer.add_scalar(f"{tag}/value_loss", last.get("value_loss", 0), update_count)
+                    tb_writer.add_scalar(f"{tag}/entropy", last.get("entropy", 0), update_count)
+                    tb_writer.add_scalar(f"{tag}/approx_kl", last.get("approx_kl", 0), update_count)
+                    tb_writer.add_scalar(f"{tag}/mean_reward_per_step", float(rewards.mean()), update_count)
+                    if episode_rewards:
+                        tb_writer.add_scalar(f"{tag}/mean_episode_reward", float(np.mean(episode_rewards)), update_count)
+                        tb_writer.add_scalar(f"{tag}/mean_episode_length", float(np.mean(episode_lengths)), update_count)
+                        episode_rewards, episode_lengths = [], []
+                    tb_writer.add_scalar(f"{tag}/collected_steps", collected, update_count)
 
-            # aggregate into a single buffer tensor set
-            obs_list, g_list, aid_list, act_list = [], [], [], []
-            logp_list, rew_list, mask_list, val_list, done_list = [], [], [], [], []
-            for b in batches:
-                obs_list.append(b["obs"])
-                g_list.append(b["global_state"])
-                aid_list.append(b["agent_id"])
-                act_list.append(b["action"])
-                logp_list.append(b["logp"])
-                rew_list.append(b["reward"])
-                mask_list.append(b["mask"])
-                val_list.append(b["value"])
-                done_list.append(b["done"])
+                if eval_fn is not None and update_count % eval_every == 0:
+                    try:
+                        evaluation = eval_fn()
+                        if tb_writer is not None and isinstance(evaluation, dict):
+                            for key, value in evaluation.items():
+                                if isinstance(value, (int, float)):
+                                    tb_writer.add_scalar(f"{tag}/eval/{key}", float(value), update_count)
+                    except Exception as error:
+                        print(f"[eval] skipped: {error}")
 
-            obs = np.concatenate(obs_list)
-            gstate = np.concatenate(g_list)
-            aid = np.concatenate(aid_list)
-            act = np.concatenate(act_list)
-            logp = np.concatenate(logp_list)
-            rew = np.concatenate(rew_list)
-            mask = np.concatenate(mask_list)
-            val = np.concatenate(val_list)
-            done = np.concatenate(done_list)
+                if log_fn:
+                    log_fn(update_count, collected, metrics[-1] if metrics else {})
+                if save_path and update_count % save_every == 0:
+                    mappo.save(save_path)
 
-            # GAE using last value bootstrap from final non-terminal
-            last_val = 0.0
-            from .buffer import RolloutBuffer
-            buf = RolloutBuffer(OBS_DIM, OBS_DIM * self.n_agents, ACTION_SPACE, capacity=len(rew) + 16)
-            buf.obs[:len(rew)] = obs
-            buf.global_state[:len(rew)] = gstate
-            buf.agent_id[:len(rew)] = aid
-            buf.action[:len(rew)] = act
-            buf.logp[:len(rew)] = logp
-            buf.reward[:len(rew)] = rew
-            buf.mask[:len(rew)] = mask
-            buf.value[:len(rew)] = val
-            buf.done[:len(rew)] = done
-            buf.ptr = len(rew)
-            buf.size = len(rew)
-            buf.compute_returns_advantages(last_value=last_val, gamma=0.99, lam=0.95)
-            batch = buf.get_tensors(mappo.device)
-
-            metrics = mappo.update(batch, n_epochs=n_epochs)
-            collected += len(rew)
-            update_count += 1
-
-            # push new weights to workers
-            self.broadcast_weights(mappo.ac.state_dict())
-
-            # ---- TensorBoard ----
-            if tb_writer is not None:
-                last = metrics[-1] if metrics else {}
-                tb_writer.add_scalar(f"{tag}/policy_loss", last.get("policy_loss", 0), update_count)
-                tb_writer.add_scalar(f"{tag}/value_loss", last.get("value_loss", 0), update_count)
-                tb_writer.add_scalar(f"{tag}/entropy", last.get("entropy", 0), update_count)
-                tb_writer.add_scalar(f"{tag}/approx_kl", last.get("approx_kl", 0), update_count)
-                tb_writer.add_scalar(f"{tag}/mean_reward_per_step", float(rew.mean()), update_count)
-                if ep_rewards:
-                    tb_writer.add_scalar(f"{tag}/mean_episode_reward", float(np.mean(ep_rewards)), update_count)
-                    tb_writer.add_scalar(f"{tag}/mean_episode_length", float(np.mean(ep_lengths)), update_count)
-                    ep_rewards, ep_lengths = [], []
-                tb_writer.add_scalar(f"{tag}/collected_steps", collected, update_count)
-
-            # ---- self-play evaluation ----
-            if eval_fn is not None and update_count % eval_every == 0:
-                try:
-                    eval_stats = eval_fn()
-                    if tb_writer is not None and isinstance(eval_stats, dict):
-                        for k, v in eval_stats.items():
-                            if isinstance(v, (int, float)):
-                                tb_writer.add_scalar(f"{tag}/eval/{k}", float(v), update_count)
-                except Exception as e:
-                    print(f"[eval] skipped: {e}")
-
-            if log_fn:
-                last = metrics[-1] if metrics else {}
-                log_fn(update_count, collected, last)
-
-            if save_path and update_count % save_every == 0:
+            if save_path:
                 mappo.save(save_path)
-
-        if save_path:
-            mappo.save(save_path)
-        self.stop()
+        finally:
+            self.stop()

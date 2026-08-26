@@ -1,8 +1,16 @@
-# 璀璨宝石：四人标准局
+# 璀璨宝石：本地、AI 与局域网对战
 
-一个使用 `pygame` 制作的璀璨宝石游戏。采用标准基础版 90 张发展卡（I/II/III 级分别为 40/30/20）和标准贵族条件，支持本地热座、生成式 AI/本地策略 AI、自定义玩家位次和获胜分数，并预留好友联网大厅接口。游戏包含 AI 生成的高清宝石、贵族与三级发展卡插画。
+基于 `pygame` 的四人《璀璨宝石》实现，使用标准基础版 90 张发展卡（I / II / III 级分别为 40 / 30 / 20 张）和标准贵族条件。
 
-## 启动
+支持：
+
+- 本地热座与启发式 AI；
+- 单人竞技（默认 15 分）与 2v2（固定 30 分）；
+- OpenAI 兼容的生成式 AI 接口；
+- 局域网房间、房主安排座次、延迟显示和断线 AI 接管；
+- 实验性的 MAPPO / PPO 自博弈训练框架。
+
+## 运行游戏
 
 ```bash
 python3 -m venv .venv
@@ -10,13 +18,19 @@ python3 -m venv .venv
 .venv/bin/python main.py
 ```
 
-当前项目目录已准备好 `.venv` 时，直接执行最后一行即可。
+### 对局规则
 
-## 开局设置
+- 单人竞技：各玩家独立计分，默认达到 15 分后完成本轮并结算。
+- 2v2：1、3 号位属于 1 队，2、4 号位属于 2 队；团队达到 30 分后完成本轮。
+- 点击宝石可拿 3 枚不同色，或在库存不少于 4 时拿 2 枚同色。
+- 点击发展卡后可购买或保留，也可以从某级牌库盲抽保留。
+- 保留发展卡时，如果库存中还有黄金，可获得 1 枚黄金。
+- 宝石超过 10 枚时，必须按提示归还。
+- `R` 重开当前配置，`Esc` 返回设置页。
 
-启动后可输入玩家名称，并选择本局 AI 数量、自己的行动位次和获胜分数。可以选择单人竞技或 2v2 组队；组队时 1、3 号位为一队，2、4 号位为一队，团队率先达到 30 分后完成本轮并按团队总分结算。未配置外部模型时会自动使用本地策略 AI。
+### 生成式 AI（可选）
 
-如需接入 OpenAI 兼容的生成式模型，可在启动前设置：
+未配置外部模型时，游戏自动使用本地启发式策略。接入 OpenAI 兼容接口：
 
 ```bash
 export SPLENDOR_AI_ENDPOINT="https://你的服务/v1/chat/completions"
@@ -24,193 +38,290 @@ export SPLENDOR_AI_API_KEY="你的密钥"
 export SPLENDOR_AI_MODEL="模型名称"
 ```
 
-## 局域网联机
+### 局域网联机
 
 1. 房主点击“创建局域网房间”，把大厅显示的 IP 发给朋友。
-2. 客人在“房主 IP”中只输入该 IP，点击“加入房间”。程序固定使用端口 `48527`。
-3. 房主在大厅用左右箭头给房主和已加入的客人安排座次，其余席位由 AI 接管。
-4. 房主点击“开始联机游戏”。对局由房主权威执行并实时同步，客人右上角显示往返延迟。
+2. 客人只输入房主 IP，程序固定使用端口 `48527`。
+3. 房主给所有玩家安排座次，其余位置由 AI 接管。
+4. 房主开始游戏；客人右上角显示实时往返延迟。
+5. 客人断线后，对应席位立即由 AI 接管。
 
-设备需位于同一局域网；若系统防火墙询问是否允许 Python 接收入站连接，请选择允许。
+设备需位于同一局域网。系统防火墙询问 Python 是否允许接收入站连接时，需要选择允许。
 
-## 项目结构
+## 代码结构
 
-- `main.py`：桌面程序入口
-- `app.py`：Pygame 界面、输入与会话协调
-- `game_engine.py`：无 UI 的游戏模型和规则
-- `game_ai.py`：合法动作、策略观测和动作执行
-- `ai_player.py`：团队启发式与生成式模型策略
-- `state_codec.py`：联机状态序列化和隐私过滤
-- `network.py`：局域网 TCP 传输
-- `rl/`：强化学习训练框架
-  - `rl/environment.py`、`rl/policy.py`、`rl/ppo_policy.py`：单智能体视角的 PPO 环境与策略协议（历史接口）
-  - `rl/mappo/`：**MAPPO / PPO 自博弈训练框架**（多智能体、CTDE、分布式 headless 收集、TensorBoard）
+| 路径 | 职责 |
+|---|---|
+| `main.py` | 桌面程序入口 |
+| `app.py` | Pygame UI、输入、AI 调度和联机会话协调 |
+| `game_engine.py` | 无 UI 的游戏模型与规则 |
+| `game_ai.py` | 合法动作、策略观测与动作执行 |
+| `ai_player.py` | 团队启发式与生成式模型策略 |
+| `state_codec.py` | 联机状态序列化和隐私过滤 |
+| `network.py` | 局域网 TCP 传输 |
+| `rl/environment.py` | 简单的无 UI 单环境接口 |
+| `rl/mappo/` | MAPPO / PPO 多进程训练框架 |
+| `tests/` | 游戏引擎、策略和训练管线回归测试 |
 
-`rl.environment.SplendorEnv` 可在不启动 Pygame 的情况下执行 `reset()`、`legal_actions()`、`step()`，为后续自博弈和 PPO 训练提供稳定接口。PPO 依赖为可选项，不影响正常游戏运行。
+运行测试：
 
-## 操作
-
-- 点击左侧彩色宝石选择：可拿 3 枚不同色，或在该颜色库存不少于 4 时双击同色拿 2 枚；然后点击“确认拿取”。
-- 点击发展卡，再点击“购买所选”或“保留所选”。也可点击每级旁的“从牌库盲抽保留”；保留卡会获得 1 枚黄金（若库存仍有）。
-- 购买后，符合条件的贵族会高亮，点击选择一位。
-- 若宝石超过 10 枚，按提示点击左侧宝石归还。
-- 有玩家达到本局设定分数后，本轮所有玩家完成行动，分数最高者获胜；同分时发展卡较少者获胜。
-- 按 `R` 可随时重开当前配置的对局；按 `Esc` 返回开局设置。
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
 
 ---
 
-# 强化学习训练（MAPPO / PPO 自博弈）
+# 强化学习实验室
 
-针对四人 / 2v2 对局的**多智能体强化学习**训练框架，位于 `rl/mappo/`。支持两种模式：
+把训练想象成一所“宝石学院”：四名学生共用一套决策大脑，在很多张无窗口牌桌上同时练习；中央教练观察完整桌面，为每个座位分别评价局势，然后使用 PPO 更新共享策略。
 
-| 模式 | 参数 | 算法 | 奖励来源 | 对手 |
-|------|------|------|----------|------|
-| `--mode team` | 2v2 组队，目标 30 分 | **MAPPO（CTDE）** | 团队总分 `team_score` | 当前策略（self-play） |
-| `--mode standard` | 4 人自由竞争，目标 15 分 | **PPO（参数共享自博弈）** | 个人 `points` | 当前策略（self-play） |
+当前训练框架已经修复：
 
-两种模式复用同一套 `ActorCritic` 网络与 `MAPPO` 更新逻辑，仅通过 `team_mode` 切换奖励与胜负判定。
+- 引擎与编码器统一使用 `white / blue / green / red / black / gold`；
+- 动作空间改为 71 个无冲突、可逆槽位；
+- Critic 使用动作发生同一时刻的权威状态，而不是历史观察拼接；
+- 每个 Worker 启动前加载主模型权重，并使用独立的 latest-only 广播队列；
+- GAE 按 Worker、Episode、Seat 分组，绝不跨轨迹传播；
+- 非终止 horizon 使用下一状态 Critic 值 bootstrap；
+- 2v2 终局胜负奖励分别写入四个座位的轨迹。
 
-## 依赖
+## 1. 网络结构
 
-- `torch`（已验证 2.11 + CUDA 12.8，RTX 5070 可用）
-- `gymnasium`、`tensorboard`（可选，仅用于查看曲线）
-- 训练完全 **headless**，无需 Pygame 窗口（`SDL_VIDEODRIVER=dummy`）。
+### 共享 Actor：负责选择动作
 
-## 一键训练脚本
-
-`train_mappo.bat`（Windows）已封装全部参数：
-
-```bat
-train_mappo.bat                :: team 模式 (MAPPO/CTDE)，默认 200 万步
-train_mappo.bat standard       :: standard 模式 (PPO/self-play)
-train_mappo.bat team 5000000   :: 自定义总步数
+```text
+278 维观察 + 4 维可学习座位 embedding
+                  │
+                  ▼
+          Linear 282 → 256 + ReLU
+          Linear 256 → 256 + ReLU
+          Linear 256 → 128 + ReLU
+          Linear 128 → 71 logits
+                  │
+                  ▼
+         非法动作 logits 设为 -1e9
+                  │
+                  ▼
+            Categorical 采样
 ```
 
-脚本默认 7 个 worker（`cpu_count-1`）、horizon 64、每轮聚合 8 个 rollout、PPO 4 epoch、每 10 次更新做一次 self-play 评估。模型保存到 `checkpoints/`，TensorBoard 日志写到 `runs/`。
+四个座位共享同一个 Actor，通过座位 embedding 学习先后手和团队位置差异。
 
-查看训练曲线：
+### Centralized Critic：负责评价局势
+
+```text
+同一时刻的 278 维权威全局状态
+                  │
+                  ▼
+          Linear 278 → 512 + ReLU
+          Linear 512 → 256 + ReLU
+          Linear 256 → 128 + ReLU
+          Linear 128 → 4 个座位价值
+```
+
+为什么输出 4 个价值？同一个桌面对 1 队可能是优势，对 2 队却是劣势。训练时根据当前行动者的 `agent_id` 选择对应价值头，避免让一个标量同时表示互相矛盾的视角。
+
+默认优化参数：
+
+- Actor Adam：`3e-4`
+- Critic Adam：`1e-3`
+- PPO clip：`0.2`
+- Value loss 系数：`0.5`
+- Entropy 系数：`0.01`
+- 梯度裁剪：`0.5`
+- GAE：`γ=0.99`、`λ=0.95`
+- 每批更新 4 epochs
+
+## 2. 278 维状态空间：每个数字代表什么
+
+颜色顺序统一为：
+
+```text
+[white, blue, green, red, black, gold]
+```
+
+### 总览
+
+| 索引 | 维度 | 内容 |
+|---|---:|---|
+| `0:6` | 6 | 银行宝石 |
+| `6:11` | 5 | 全局规则和团队状态 |
+| `11:20` | 9 | 当前行动者 |
+| `20:80` | 60 | 四名玩家，每人 15 维 |
+| `80:248` | 168 | 三级共 12 个桌面卡槽，每卡 14 维 |
+| `248:278` | 30 | 五位贵族，每位 6 维 |
+| **合计** | **278** | Actor 与 Critic 的状态输入 |
+
+### `0:6`：银行宝石
+
+六个值依次为白、蓝、绿、红、黑、黄金库存。
+
+### `6:11`：全局信息
+
+| 索引 | 含义 | 编码 |
+|---:|---|---|
+| 6 | 目标分数 | `target / 30` |
+| 7 | 是否 2v2 | 0 或 1 |
+| 8 | 1 队分数 | `score / 30`，单人模式为 0 |
+| 9 | 2 队分数 | `score / 30`，单人模式为 0 |
+| 10 | 是否已进入最后一轮 | 0 或 1 |
+
+### `11:20`：当前行动者
+
+| 索引 | 含义 |
+|---:|---|
+| 11 | 座位号归一化：`seat / 3` |
+| 12～17 | 六色宝石数量 |
+| 18 | 保留卡数量：`reserved / 3` |
+| 19 | 个人分数：`score / target` |
+
+### `20:80`：四名玩家
+
+每位玩家占 15 维，第 `s` 个座位从 `20 + 15×s` 开始：
+
+```text
+个人分数 1
++ 六色宝石 6
++ 六色永久折扣 6
++ 已购卡数量 1
++ 保留卡数量 1
+= 15
+```
+
+座位范围：
+
+- seat 0：`20:35`
+- seat 1：`35:50`
+- seat 2：`50:65`
+- seat 3：`65:80`
+
+### `80:248`：12 个固定桌面卡槽
+
+每层固定保留 4 个槽位，即使牌堆耗尽也在该层内部补零，不会让下一层卡牌“串位”。顺序是：
+
+```text
+I 级 4 张 → II 级 4 张 → III 级 4 张
+```
+
+每张卡 14 维：
+
+```text
+等级/3                       1
+奖励颜色 one-hot             6
+分数/5                       1
+六色费用/7                   6
+总计                         14
+```
+
+### `248:278`：5 位贵族
+
+每位贵族 6 维，对应六色需求；没有贵族的位置补零。基础版贵族不需要黄金，因此黄金需求通常是 0。
+
+> 当前 Actor 观察的是完整公开桌面状态。后续若加入隐藏信息训练，可通过 `priv_seat` 增加私人保留卡等座位专属信息；Critic 仍使用权威全局状态。
+
+## 3. 71 维动作空间：怎么算出来的
+
+| 槽位 | 数量 | 动作 |
+|---|---:|---|
+| `0:12` | 12 | 购买桌面卡：3 层 × 4 张 |
+| `12:24` | 12 | 保留桌面卡：3 层 × 4 张 |
+| `24:27` | 3 | 从 I / II / III 级牌库盲抽保留 |
+| `27:30` | 3 | 购买自己的第 1 / 2 / 3 张保留卡 |
+| `30:60` | 30 | 拿宝石组合 |
+| `60:65` | 5 | 选择第 1～5 位贵族 |
+| `65:71` | 6 | 归还六种宝石之一 |
+| **合计** | **71** | 固定离散动作空间 |
+
+“拿宝石”的 30 个槽位来自：
+
+```text
+拿 1 种不同色：C(5,1) = 5
+拿 2 种不同色：C(5,2) = 10
+拿 3 种不同色：C(5,3) = 10
+拿 2 枚同色：5
+合计：5 + 10 + 10 + 5 = 30
+```
+
+为什么保留 1 种和 2 种不同色？当银行只剩一两种可用颜色时，规则允许拿完当前可用的不同颜色。
+
+固定映射使用 `(tier - 1) × 4 + position`，避免过去 tier 从 1 开始造成偏移。每一步由 `action mask` 屏蔽当前非法槽位；编码器会检测重复槽位和无法编码的合法动作并立即报错。测试会验证 71 种理论动作与 `0...70` 一一对应并可逆。
+
+## 4. 训练管线
+
+```text
+主进程创建 Actor + Critic
+        │
+        ├─ 把相同初始权重分别发送给每个 Worker
+        │
+多个 CPU Worker 并行
+        ├─ 持续运行各自的无窗口牌桌
+        ├─ 每步保存动作发生前的 obs 与同一时刻 global state
+        ├─ rollout 达到 horizon 后，延长到完整轮边界再切分
+        ├─ 非终止切分使用下一状态的四座位 Critic 值 bootstrap
+        └─ 将 rollout 和 episode 边界发回主进程
+        │
+        ▼
+主进程
+        ├─ 分别对每个 Worker / Episode / Seat 计算 GAE
+        ├─ 计算完 advantage 后才合并 batch
+        ├─ PPO-clip 更新共享 Actor
+        ├─ MSE 更新四头 Centralized Critic
+        ├─ 写 TensorBoard、评估、保存 checkpoint
+        └─ 通过每个 Worker 独立的 latest-only 队列广播新权重
+```
+
+关键保证：
+
+- 不会把 Worker A 的奖励接到 Worker B 的轨迹后面；
+- 不会把 seat 0 的 advantage 递推到 seat 1；
+- horizon 截断不会假装游戏结束；
+- Worker 第一局就使用主模型权重，而不是各自随机初始化；
+- 某个 Worker 不会“吃掉”本应发给其他 Worker 的权重消息。
+
+## 5. 奖励：AI 什么时候获得反馈
+
+### 逐步奖励
+
+```text
+单人模式：当前行动者个人分数变化
+2v2 模式：当前行动者所属队伍总分变化
+```
+
+获得有分发展卡或贵族时会得到正奖励。拿宝石、购买 0 分卡、保留和阻断通常即时奖励为 0，由价值函数和 GAE 学习其长期作用。
+
+### 终局奖励
+
+```text
+获胜座位 / 获胜队伍中的两个座位：+10
+失败座位 / 失败队伍中的两个座位：-10
+```
+
+奖励会写入每个座位在本局终局段的最后一条动作轨迹，而不是只奖励触发结算的最后行动者。之后 GAE 按座位独立向前传播。
+
+## 6. 本机训练建议
+
+本机为 Apple M5 Pro、18 核 CPU、20 核 GPU、48 GB 统一内存。约 49 万参数的新模型规模很小，硬件足够；主要瓶颈更可能是 Python 环境采样。
+
+训练依赖单独安装：
 
 ```bash
-tensorboard --logdir runs
+.venv/bin/python -m pip install -r requirements-train.txt
 ```
 
-也可直接调用（全部参数可见）：
+训练入口会依次选择 CUDA、Apple MPS、CPU。建议先进行极短 smoke run，而不是直接跑百万步：
 
 ```bash
-python -m rl.mappo.main_train --mode team --timesteps 2000000 \
-    --workers 7 --target-score 30 --save checkpoints/mappo_team.pt --tb-runs runs/team
+.venv/bin/python -m rl.mappo.main_train \
+  --mode team --workers 4 --horizon 64 --device mps \
+  --timesteps 10000 --save checkpoints/mappo_team.pt --tb-runs runs
 ```
 
-## 训练管线
+本次修复没有执行训练，只运行状态编码、动作映射、Worker 采样、GAE、bootstrap、团队奖励和游戏回归测试。
 
-```
- 多进程 Worker ×7 (CPU, headless)              主进程 (GPU / RTX 5070)
-┌───────────────────────────────┐            ┌──────────────────────────────────┐
-│ 各自跑一局 SplendorMAEnv       │ rollout    │ MAPPO.update：                  │
-│ 当前策略 self-play 收集：       │ ─────────► │  PPO-clip 策略损失              │
-│  obs, mask, action, logp,     │ batches    │  + 集中式 critic 价值损失       │
-│  reward, value, done          │            │  + 熵正则                       │
-│  + episode 级（总奖励/长度）   │ ◄───────── │  → 算 GAE 优势 → 多 epoch 优化  │
-└───────────────────────────────┘ 权重广播   │  → 新权重 pickle 回传 worker    │
-                                            └──────────────────────────────────┘
-                                                          │
-                                            TensorBoard：loss / value / entropy /
-                                            kl / reward / length / win_rate
-```
+## 7. 仍值得继续改进
 
-- **CTDE（集中式训练 / 去中心化执行）**：训练时 critic 接收**全局状态**（4 个 agent 观察的拼接），actor 只接收各自编码后的观察；执行时每个 agent 独立决策。
-- **分布式收集**：7 个 worker 进程各自 headless 跑环境、用 CPU 做推理，通过 `multiprocessing.Queue` 把 rollout 回传主进程；主进程在 GPU 上做 MAPPO 更新后，把新权重广播给所有 worker。
-- **Self-play**：收集阶段 4 个 seat 全部使用同一份（参数共享 + `agent_id` embedding 的）策略，即始终与"自己"对打。每 `eval_every` 次更新，`SelfPlayArena` 让当前策略坐 seat0、其余 seat 用随机基线，统计胜率写入 TensorBoard。
-
-## 状态空间（observation）
-
-`encoders.encode_observation` 把任意全局状态压成**定长 278 维** float 向量（`obs_dim`）。布局如下：
-
-| 区块 | 维度 | 内容 |
-|------|------|------|
-| bank | 6 | 6 色宝石银行存量 |
-| 全局标量 | 10 | 目标分、team_mode、两队分数(2)、round_end、当前玩家（座位号、宝石6、保留数、分数） |
-| 4 名玩家 | 4×15 | 每玩家：分数 + 宝石(6) + 折扣(6) + 卡数 + 保留数 |
-| 桌面卡 | 12×14 | 每张：tier(1) + bonus 颜色 one-hot(6) + points(1) + cost(6)，最多 12 张 |
-| 贵族 | 5×6 | 每个贵族的宝石需求（最多 5 个） |
-
-合计 `6 + 10 + 60 + 168 + 30 = 278`。
-
-- **Actor 输入**：单个 agent 的 278 维观察 + `agent_id` one-hot(4)。
-- **Critic 输入（全局状态）**：4 个 agent 观察拼接 = **1112 维**（`OBS_DIM * 4`）。
-
-> 说明：当前每个 agent 观察均为"全局信息编码"，差异仅体现在 `current_player` 区块；critic 进一步拼接 4 份以符合 CTDE 的集中式输入约定，未来可在此处加入隐私屏蔽（仅暴露公开信息）。
-
-## 动作空间（action）
-
-游戏原生动作是变长的字符串 id（如 `buy:table:0:2`），不便直接做固定维度策略。这里**枚举成固定 62 维离散空间**（`ACTION_SPACE = 62`），并用 **action mask** 屏蔽非法动作（softmax 前对非法槽位置 `-1e9`）：
-
-| 槽位区间 | 数量 | 动作 |
-|----------|------|------|
-| 0 – 11 | 12 | 买桌面卡：`tier×4 + pos` |
-| 12 – 14 | 3 | 保留桌面卡 |
-| 15 – 17 | 3 | 从牌库盲抽并保留（按 tier） |
-| 18 – 20 | 3 | 买保留区卡 |
-| 21 – (21+N_TAKE) | 40 | 拿宝石组合（3 枚异色 / 双同色，预枚举） |
-| +5 | 5 | 选择贵族 |
-| +6 | 6 | 归还某色宝石（超额时） |
-
-执行时由 `slot_to_action_id` 把选中的槽位映射回游戏可识别的 action id。`build_action_mask` 依据 `game_ai.legal_actions` 生成当前合法掩码。
-
-## 奖励设计
-
-在 `envs.SplendorMAEnv.step` 中实现：
-
-- **逐步奖励** = 该 agent 行动后分数增量
-  - team 模式：本队 `team_score` 增量
-  - standard 模式：个人 `points` 增量
-- **终局奖励** = 胜 `+10` / 负 `−10`（按 `winner_team` / `winner` 判定）
-- 信号较稀疏（仅得分/终局时非零），依赖 **GAE（γ=0.99, λ=0.95）** 把信用回溯到先前的拿宝石、保留、布局等决策。
-
-## 网络结构（`networks.py`）
-
-**Actor（去中心化，参数共享）**
-```
-输入: obs(278) 拼接 agent_id one-hot(4)  →  [278+4]
-线性 → ReLU → 256 → 256 → 128 → 线性 → 62 (logits)
-                                      │
-                            mask 屏蔽非法 → Categorical 采样
-```
-
-**Centralized Critic（集中式）**
-```
-输入: global_state(1112 = 4×278)
-线性 → ReLU → 512 → 256 → 128 → 线性 → 1 (V)
-```
-
-- Actor / Critic 各自独立 Adam（`lr_actor=3e-4`、`lr_critic=1e-3`），梯度裁剪 `max_grad_norm=0.5`。
-- 损失：`L = L_clip^actor − c2·entropy + c1·value_loss`，PPO 裁剪 ε=0.2。
-- 全部 `.to(cuda)` 运行在 5070；worker 用 CPU 推理。
-
-## TensorBoard 曲线
-
-日志前缀为 `team/` 或 `standard/`，包含：
-
-- 训练：`policy_loss`、`value_loss`、`entropy`、`approx_kl`、`mean_reward_per_step`
-- 整局：`mean_episode_reward`、`mean_episode_length`、`collected_steps`
-- 自博弈评估（`eval/`）：`win_rate_seat0`（standard）或 `win_rate_team0`/`win_rate_team1`（team）、`mean_score`、`mean_length`
-
-## 文件导航（`rl/mappo/`）
-
-| 文件 | 职责 |
-|------|------|
-| `encoders.py` | 状态/动作编码、action mask、维度常量 |
-| `envs.py` | `SplendorMAEnv` 回合制多智能体环境封装（复用 `game_engine`） |
-| `networks.py` | 共享 Actor + 集中式 Critic |
-| `buffer.py` | Rollout 缓冲 + GAE 优势计算 |
-| `algo.py` | MAPPO 更新（PPO-clip + 价值 + 熵） |
-| `collector.py` | 多进程 headless 分布式数据收集器 |
-| `selfplay.py` | `SelfPlayArena` 自博弈胜率评估 |
-| `main_train.py` | 训练入口（CLI + TensorBoard + 评估） |
-
-## 后续可扩展
-
-- **Fictitious Self-Play**：把 `SelfPlayArena` 的 `opponent_pool` 接成历史 checkpoint 对手池（目前评估用随机基线），提升训练稳定性。
-- **隐私屏蔽**：在 `encode_observation` 中加入对手保留卡等隐蔽信息的可见性控制，更贴近真实 CTDE 假设。
-- **课程学习**：先用较小目标分（如 15）预热，再逐步提升到 30。
-
+- 建立历史 checkpoint 对手池，让策略不只和最新版自己对战；
+- 为 Actor 定义真正的私人观察，进一步严格化 CTDE；
+- 为长训练加入恢复 optimizer、随机数和训练步数的完整 checkpoint；
+- 基准测试本机 `cpu` 与 `mps`，小网络不一定在 MPS 上更快；
+- 谨慎评估贵族进度等潜势型 reward shaping，避免改变最优策略。

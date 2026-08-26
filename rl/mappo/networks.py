@@ -4,9 +4,9 @@
   Here we use *one shared Actor* across agents for sample efficiency, with an
   agent-id one-hot appended so agents can differentiate roles. Input is the
   (privacy-agnostic) encoded observation; output is a masked action distribution.
-- Critic: centralized. Consumes the *joint global state* (concatenation of all
-  agents' encoded observations) and outputs a single state value V(s) shared by
-  all agents (standard MAPPO centralized critic).
+- Critic: centralized. Consumes one canonical authoritative state captured at
+  the same instant as the action and outputs one perspective-specific value per
+  seat.
 
 All networks are torch nn.Modules and run on CUDA when available (RTX 5070).
 """
@@ -58,19 +58,20 @@ class Actor(nn.Module):
 
 
 class CentralizedCritic(nn.Module):
-    """Centralized critic: joint global state -> scalar value."""
+    """Centralized critic: one canonical current state -> one value per seat."""
 
-    def __init__(self, global_dim: int, hidden: List[int] = None):
+    def __init__(self, global_dim: int, n_agents: int, hidden: List[int] = None):
         super().__init__()
         if hidden is None:
             hidden = [512, 256, 128]
-        layers = [global_dim] + hidden + [1]
+        self.n_agents = n_agents
+        layers = [global_dim] + hidden + [n_agents]
         self.net = _mlp(layers)
 
     def forward(self, global_state: torch.Tensor) -> torch.Tensor:
         """
-        global_state: (B, global_dim)  -- concatenation of all agents' obs
-        returns: (B, 1)
+        global_state: (B, global_dim), captured at the same instant as the action
+        returns: (B, n_agents), a perspective-specific value for each seat
         """
         return self.net(global_state)
 
@@ -81,7 +82,7 @@ class ActorCritic(nn.Module):
     def __init__(self, obs_dim: int, action_dim: int, n_agents: int, global_dim: int):
         super().__init__()
         self.actor = Actor(obs_dim, action_dim, n_agents)
-        self.critic = CentralizedCritic(global_dim)
+        self.critic = CentralizedCritic(global_dim, n_agents)
 
     def act(self, obs, agent_id, mask, deterministic=False):
         with torch.no_grad():
@@ -99,14 +100,6 @@ class ActorCritic(nn.Module):
         dist = torch.distributions.Categorical(logits=logits)
         logp = dist.log_prob(action)
         entropy = dist.entropy()
-        value = self.critic(global_state).squeeze(-1)
+        values = self.critic(global_state)
+        value = values.gather(1, agent_id.unsqueeze(-1)).squeeze(-1)
         return logp, entropy, value, dist
-
-
-def global_state_from_obs_list(obs_list: List[torch.Tensor]) -> torch.Tensor:
-    """Concatenate per-agent encoded observations into a joint global state.
-
-    obs_list: list of (B, obs_dim) tensors, one per agent
-    returns: (B, obs_dim * n_agents)
-    """
-    return torch.cat(obs_list, dim=-1)

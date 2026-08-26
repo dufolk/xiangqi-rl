@@ -1,209 +1,201 @@
-"""Observation / action encoders for MAPPO on Splendor.
+"""Fixed observation and action encoders for Splendor MAPPO.
 
-Design goals (CTDE):
-- A *fixed-length* global observation vector so the centralized critic can
-  ingest the full joint state, while decentralized actors can share the same
-  encoder (optionally privacy-masked downstream).
-- A *fixed-size* discrete action space. The actual legal actions are produced
-  by ``game_ai.legal_actions``; we map each legal action onto a fixed slot via
-  an action mask so PPO can operate over a constant dimensionality.
+Observation layout (278 floats):
+    bank 6 | globals 5 | current player 9 | players 4*15 |
+    table 3*4*14 | nobles 5*6
+
+Action layout (71 unique slots):
+    buy table 12 | reserve table 12 | reserve deck 3 | buy reserved 3 |
+    take 30 | noble 5 | return 6
 """
 
-from typing import Any, Dict, List, Tuple
+import itertools
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-GEM_KEYS = ["diamond", "sapphire", "emerald", "ruby", "onyx", "gold"]
-GEM_IDX = {g: i for i, g in enumerate(GEM_KEYS)}
+GEM_KEYS = ["white", "blue", "green", "red", "black", "gold"]
+COLORED_GEMS = GEM_KEYS[:-1]
+GEM_IDX = {gem: index for index, gem in enumerate(GEM_KEYS)}
 
-# Fixed board sizes -------------------------------------------------------
-MAX_TABLE_PER_TIER = 4          # game_engine lays out 4 cards per tier
+MAX_TABLE_PER_TIER = 4
 N_TIERS = 3
-MAX_TABLE_CARDS = MAX_TABLE_PER_TIER * N_TIERS   # 12
 MAX_RESERVED = 3
 MAX_NOBLES = 5
 N_PLAYERS = 4
 
-# Fixed action space -------------------------------------------------------
-# Slots:
-#   0..11     buy table card (tier*4 + pos)          12
-#   12..14    reserve table card (tier*4 + pos)       3
-#   15..17    reserve deck (tier)                     3
-#   18..20    buy reserved (reserved index)           3
-#   21..25    take 3 distinct gems (one slot per gem as "anchor"; see below) -> NOT used
-#   We instead enumerate concrete take combos explicitly.
-# To keep it simple & exhaustive enough, we enumerate take combos programmatically.
-import itertools
-_TAKE_COMBOS: List[Tuple[str, ...]] = []
-for r in (1, 2, 3):
-    for combo in itertools.combinations(GEM_KEYS[:-1], r):  # exclude gold from 3-distinct
-        _TAKE_COMBOS.append(combo)
-# double-take (need >=4 in bank): one gem twice
-for g in GEM_KEYS[:-1]:
-    _TAKE_COMBOS.append((g, g))
-# gold-only special: taking gold alone not allowed by rules, skip.
+BANK_DIM = 6
+GLOBAL_DIM = 5
+CURRENT_PLAYER_DIM = 9
+PLAYER_DIM = 15
+CARD_DIM = 14
+NOBLE_DIM = 6
+OBS_DIM = BANK_DIM + GLOBAL_DIM + CURRENT_PLAYER_DIM + N_PLAYERS * PLAYER_DIM + N_TIERS * MAX_TABLE_PER_TIER * CARD_DIM + MAX_NOBLES * NOBLE_DIM
+
+_TAKE_COMBOS: List[Tuple[str, ...]] = [
+    combo
+    for size in (1, 2, 3)
+    for combo in itertools.combinations(COLORED_GEMS, size)
+]
+_TAKE_COMBOS += [(gem, gem) for gem in COLORED_GEMS]
+_TAKE_TO_INDEX = {combo: index for index, combo in enumerate(_TAKE_COMBOS)}
 N_TAKE = len(_TAKE_COMBOS)
 
-# Slot layout
-SLOT_BUY_TABLE = 0                      # +12
-SLOT_RESERVE_TABLE = 12                 # +3
-SLOT_RESERVE_DECK = 15                  # +3
-SLOT_BUY_RESERVED = 18                  # +3
-SLOT_TAKE = 21                          # +N_TAKE
-SLOT_NOBLE = 21 + N_TAKE                # +MAX_NOBLES
-SLOT_RETURN = SLOT_NOBLE + MAX_NOBLES   # +6 (return each gem)
-ACTION_DIM = SLOT_RETURN + 6
+SLOT_BUY_TABLE = 0
+SLOT_RESERVE_TABLE = SLOT_BUY_TABLE + 12
+SLOT_RESERVE_DECK = SLOT_RESERVE_TABLE + 12
+SLOT_BUY_RESERVED = SLOT_RESERVE_DECK + 3
+SLOT_TAKE = SLOT_BUY_RESERVED + 3
+SLOT_NOBLE = SLOT_TAKE + N_TAKE
+SLOT_RETURN = SLOT_NOBLE + MAX_NOBLES
+ACTION_SPACE = SLOT_RETURN + len(GEM_KEYS)
 
-# Noble / return only happen in specific phases; mask handles legality.
-
-
-def _gem_vec(d: Dict[str, int]) -> List[float]:
-    return [float(d.get(g, 0)) for g in GEM_KEYS]
+assert OBS_DIM == 278
+assert N_TAKE == 30
+assert ACTION_SPACE == 71
 
 
-def encode_observation(obs: Dict[str, Any], priv_seat: int = None) -> np.ndarray:
-    """Encode a global observation dict into a fixed-length float vector.
+def _gem_vec(values: Dict[str, int]) -> List[float]:
+    return [float(values.get(gem, 0)) for gem in GEM_KEYS]
 
-    ``priv_seat`` is accepted for API symmetry (privacy masking can be applied
-    here later); currently the full global state is encoded for CTDE.
+
+def _card_vec(card: Optional[Dict[str, Any]]) -> List[float]:
+    if not card:
+        return [0.0] * CARD_DIM
+    tier = int(card.get("tier", 0))
+    bonus = card.get("bonus")
+    return (
+        [float(tier) / N_TIERS]
+        + [1.0 if bonus == gem else 0.0 for gem in GEM_KEYS]
+        + [float(card.get("points", 0)) / 5.0]
+        + [float(card.get("cost", {}).get(gem, 0)) / 7.0 for gem in GEM_KEYS]
+    )
+
+
+def encode_observation(obs: Dict[str, Any], priv_seat: Optional[int] = None) -> np.ndarray:
+    """Encode the authoritative public state into the fixed 278-dimensional vector.
+
+    ``priv_seat`` is reserved for future private actor observations. The current
+    game observation contains only public information and reserve-card counts.
     """
-    vec: List[float] = []
+    del priv_seat
+    vector: List[float] = []
 
-    # Bank (6)
-    vec += _gem_vec(obs.get("bank", {}))
+    vector += _gem_vec(obs.get("bank", {}))
+    target = max(1, int(obs.get("target_score", 15)))
+    team_mode = bool(obs.get("team_mode", False))
+    team_scores = obs.get("team_scores") or [0, 0]
+    vector += [
+        float(target) / 30.0,
+        float(team_mode),
+        float(team_scores[0]) / 30.0 if team_mode else 0.0,
+        float(team_scores[1]) / 30.0 if team_mode else 0.0,
+        float(bool(obs.get("round_end", False))),
+    ]
 
-    # Global scalars
-    vec.append(float(obs.get("target_score", 15)))
-    vec.append(float(obs.get("team_mode", 0)))
-    if obs.get("team_mode"):
-        ts = obs.get("team_scores") or [0, 0]
-        vec += [float(ts[0]), float(ts[1])]
-    else:
-        vec += [0.0, 0.0]
-    vec.append(float(obs.get("round_end", 0)))
+    current = obs.get("current_player", {})
+    vector.append(float(current.get("seat", 0)) / (N_PLAYERS - 1))
+    vector += _gem_vec(current.get("gems", {}))
+    vector.append(float(current.get("reserved", 0)) / MAX_RESERVED)
+    vector.append(float(current.get("score", 0)) / target)
 
-    # Current player block (6): seat one-hot-ish (seat norm) + gems
-    cur = obs.get("current_player", {})
-    vec.append(float(cur.get("seat", 0)) / max(1, N_PLAYERS - 1))
-    vec += _gem_vec(cur.get("gems", {}))
-    vec.append(float(cur.get("reserved", 0)) / MAX_RESERVED)
-    vec.append(float(cur.get("score", 0)) / max(1, obs.get("target_score", 15)))
-
-    # All players (4 x (score1 + gems6 + discounts6 + cards1 + reserved1))
     players = obs.get("players", [])
     for seat in range(N_PLAYERS):
-        if seat < len(players):
-            p = players[seat]
-            vec.append(float(p.get("score", 0)) / max(1, obs.get("target_score", 15)))
-            vec += _gem_vec(p.get("gems", {}))
-            vec += _gem_vec(p.get("discounts", {}))
-            vec.append(float(p.get("cards", 0)) / 30.0)
-            vec.append(float(p.get("reserved", 0)) / MAX_RESERVED)
-        else:
-            vec += [0.0] * (1 + 6 + 6 + 1 + 1)
+        if seat >= len(players):
+            vector += [0.0] * PLAYER_DIM
+            continue
+        player = players[seat]
+        vector.append(float(player.get("score", 0)) / target)
+        vector += _gem_vec(player.get("gems", {}))
+        vector += _gem_vec(player.get("discounts", {}))
+        vector.append(float(player.get("cards", 0)) / 30.0)
+        vector.append(float(player.get("reserved", 0)) / MAX_RESERVED)
 
-    # Table cards: MAX_TABLE_CARDS x (tier1 + bonus6 + points1 + cost6)
-    table_flat: List[Dict[str, Any]] = obs.get("table", [])
-    # table_flat may be a flat list already (as produced by observation())
-    card_vecs = []
-    for card in table_flat[:MAX_TABLE_CARDS]:
-        cv = [float(card.get("tier", 0)) / N_TIERS]
-        bonus = card.get("bonus")
-        cv += [1.0 if bonus == g else 0.0 for g in GEM_KEYS]
-        cv.append(float(card.get("points", 0)) / 5.0)
-        cv += [float(card.get("cost", {}).get(g, 0)) / 7.0 for g in GEM_KEYS]
-        card_vecs.append(cv)
-    while len(card_vecs) < MAX_TABLE_CARDS:
-        card_vecs.append([0.0] * (1 + 6 + 1 + 6))
-    for cv in card_vecs:
-        vec += cv
+    cards_by_tier = {tier: [] for tier in range(1, N_TIERS + 1)}
+    for card in obs.get("table", []):
+        tier = int(card.get("tier", 0))
+        if tier in cards_by_tier and len(cards_by_tier[tier]) < MAX_TABLE_PER_TIER:
+            cards_by_tier[tier].append(card)
+    for tier in range(1, N_TIERS + 1):
+        tier_cards = cards_by_tier[tier]
+        for position in range(MAX_TABLE_PER_TIER):
+            vector += _card_vec(tier_cards[position] if position < len(tier_cards) else None)
 
-    # Nobles: MAX_NOBLES x 6 (each noble is a gem->count dict)
     nobles = obs.get("nobles", [])[:MAX_NOBLES]
-    for noble in nobles:
-        vec += _gem_vec(noble)
-    while len(nobles) < MAX_NOBLES:
-        vec += [0.0] * 6
-        nobles = nobles + [None]  # keep loop bound stable
+    for index in range(MAX_NOBLES):
+        vector += _gem_vec(nobles[index]) if index < len(nobles) else [0.0] * NOBLE_DIM
 
-    return np.asarray(vec, dtype=np.float32)
-
-
-def build_action_mask(legal: List[Dict[str, Any]]) -> np.ndarray:
-    """Return a boolean-ish float mask of size ACTION_DIM for legal actions."""
-    mask = np.zeros(ACTION_DIM, dtype=np.float32)
-    for a in legal:
-        idx = _action_to_slot(a["id"])
-        if idx is not None and 0 <= idx < ACTION_DIM:
-            mask[idx] = 1.0
-    return mask
+    encoded = np.asarray(vector, dtype=np.float32)
+    if encoded.shape != (OBS_DIM,):
+        raise ValueError(f"observation encoder produced {encoded.shape}, expected {(OBS_DIM,)}")
+    return encoded
 
 
-def _action_to_slot(action_id: str):
+def _table_offset(tier: int, position: int) -> Optional[int]:
+    if 1 <= tier <= N_TIERS and 0 <= position < MAX_TABLE_PER_TIER:
+        return (tier - 1) * MAX_TABLE_PER_TIER + position
+    return None
+
+
+def _normalize_take(gems: Tuple[str, ...]) -> Optional[Tuple[str, ...]]:
+    if not gems or any(gem not in COLORED_GEMS for gem in gems):
+        return None
+    if len(gems) == 2 and gems[0] == gems[1]:
+        return gems
+    if len(set(gems)) != len(gems) or len(gems) > 3:
+        return None
+    return tuple(sorted(gems, key=COLORED_GEMS.index))
+
+
+def action_to_slot(action_id: str) -> Optional[int]:
     parts = action_id.split(":")
     if not parts:
         return None
-    kind = parts[0]
     try:
-        if kind == "buy":
-            loc = parts[1]
-            if loc == "table":
-                tier, pos = int(parts[2]), int(parts[3])
-                return SLOT_BUY_TABLE + tier * MAX_TABLE_PER_TIER + pos
-            elif loc == "reserved":
-                return SLOT_BUY_RESERVED + int(parts[3])
-        elif kind == "reserve":
-            if len(parts) == 3:  # reserve:table:tier:pos
-                tier, pos = int(parts[1]), int(parts[2])
-                return SLOT_RESERVE_TABLE + tier * MAX_TABLE_PER_TIER + pos
-        elif kind == "reserve_deck":
+        kind = parts[0]
+        if kind == "buy" and len(parts) == 4:
+            if parts[1] == "table":
+                offset = _table_offset(int(parts[2]), int(parts[3]))
+                return None if offset is None else SLOT_BUY_TABLE + offset
+            if parts[1] == "reserved":
+                index = int(parts[3])
+                return SLOT_BUY_RESERVED + index if 0 <= index < MAX_RESERVED else None
+        if kind == "reserve" and len(parts) == 3:
+            offset = _table_offset(int(parts[1]), int(parts[2]))
+            return None if offset is None else SLOT_RESERVE_TABLE + offset
+        if kind == "reserve_deck" and len(parts) == 2:
             tier = int(parts[1])
-            return SLOT_RESERVE_DECK + tier
-        elif kind == "take":
-            gems = tuple(parts[1].split(","))
-            # normalize ordering for combo lookup
-            norm = tuple(sorted(gems)) if len(set(gems)) == len(gems) else gems
-            for i, combo in enumerate(_TAKE_COMBOS):
-                if tuple(sorted(combo)) == tuple(sorted(gems)) or combo == gems:
-                    return SLOT_TAKE + i
-            return None
-        elif kind == "noble":
-            idx = int(parts[1])
-            if 0 <= idx < MAX_NOBLES:
-                return SLOT_NOBLE + idx
-        elif kind == "return":
-            gem = parts[1]
-            if gem in GEM_IDX:
-                return SLOT_RETURN + GEM_IDX[gem]
+            return SLOT_RESERVE_DECK + tier - 1 if 1 <= tier <= N_TIERS else None
+        if kind == "take" and len(parts) == 2:
+            combo = _normalize_take(tuple(parts[1].split(",")))
+            index = _TAKE_TO_INDEX.get(combo) if combo else None
+            return None if index is None else SLOT_TAKE + index
+        if kind == "noble" and len(parts) == 2:
+            index = int(parts[1])
+            return SLOT_NOBLE + index if 0 <= index < MAX_NOBLES else None
+        if kind == "return" and len(parts) == 2 and parts[1] in GEM_IDX:
+            return SLOT_RETURN + GEM_IDX[parts[1]]
     except (ValueError, IndexError):
         return None
     return None
 
 
-def slot_to_action_id(slot: int, legal: List[Dict[str, Any]]) -> str:
-    """Map a chosen slot back to a legal action id (must be within mask)."""
-    # Recompute mapping from legal list to be safe
-    for a in legal:
-        if _action_to_slot(a["id"]) == slot:
-            return a["id"]
-    # fallback: first legal
-    return legal[0]["id"] if legal else ""
+def build_action_mask(legal_actions: List[Dict[str, Any]]) -> np.ndarray:
+    mask = np.zeros(ACTION_SPACE, dtype=np.float32)
+    seen = set()
+    for action in legal_actions:
+        slot = action_to_slot(action["id"])
+        if slot is None:
+            raise ValueError(f"legal action has no fixed slot: {action['id']}")
+        if slot in seen:
+            raise ValueError(f"action slot collision at {slot}: {action['id']}")
+        seen.add(slot)
+        mask[slot] = 1.0
+    return mask
 
 
-# Convenience shapes
-def obs_dim() -> int:
-    # compute once by encoding an empty-ish structure is overkill; hardcode via probe
-    probe = {
-        "bank": {g: 0 for g in GEM_KEYS},
-        "target_score": 15, "team_mode": 0, "team_scores": [0, 0],
-        "round_end": 0,
-        "current_player": {"seat": 0, "gems": {g: 0 for g in GEM_KEYS}, "reserved": 0, "score": 0},
-        "players": [{"score": 0, "gems": {g: 0 for g in GEM_KEYS}, "discounts": {g: 0 for g in GEM_KEYS}, "cards": 0, "reserved": 0} for _ in range(N_PLAYERS)],
-        "table": [],
-        "nobles": [],
-    }
-    return int(encode_observation(probe).shape[0])
-
-
-OBS_DIM = obs_dim()
-ACTION_SPACE = ACTION_DIM
+def slot_to_action_id(slot: int, legal_actions: List[Dict[str, Any]]) -> str:
+    matches = [action["id"] for action in legal_actions if action_to_slot(action["id"]) == slot]
+    if len(matches) != 1:
+        raise ValueError(f"slot {slot} maps to {len(matches)} legal actions")
+    return matches[0]

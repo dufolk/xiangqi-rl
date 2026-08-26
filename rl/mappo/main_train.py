@@ -42,6 +42,14 @@ from rl.mappo.encoders import ACTION_SPACE, OBS_DIM
 from rl.mappo.selfplay import SelfPlayArena
 
 
+def default_device():
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def build_argparser():
     p = argparse.ArgumentParser(description="Splendor MAPPO/PPO (self-play) trainer")
     p.add_argument("--mode", choices=["team", "standard"], default="team",
@@ -64,7 +72,7 @@ def build_argparser():
     p.add_argument("--eval-every", type=int, default=10, help="eval + TB log frequency (updates)")
     p.add_argument("--eval-games", type=int, default=32, help="games per self-play eval")
     p.add_argument("--log-every", type=int, default=1)
-    p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--device", type=str, default=default_device())
     return p
 
 
@@ -85,7 +93,7 @@ def main():
 
     mappo = MAPPO(
         obs_dim=OBS_DIM, action_dim=ACTION_SPACE, n_agents=args.n_agents,
-        global_dim=OBS_DIM * args.n_agents, device=device,
+        global_dim=OBS_DIM, device=device,
         lr_actor=args.lr_actor, lr_critic=args.lr_critic,
         entropy_coef=args.entropy_coef, clip_eps=args.clip_eps,
     )

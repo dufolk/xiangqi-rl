@@ -100,6 +100,7 @@ def observation(game: Game) -> Dict[str, Any]:
             "relation": "self" if seat == game.turn else "teammate" if game.team_mode and seat % 2 == game.turn % 2 else "opponent",
             "score": player.points,
             "cards": len(player.cards),
+            "reserved": len(player.reserved),
             "gems": player.gems,
             "discounts": {gem: player.discount(gem) for gem in GEM_KEYS},
         } for seat, player in enumerate(game.players)],

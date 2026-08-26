@@ -42,7 +42,7 @@ class SelfPlayArena:
 
     def _make_actor(self, state_dict: Optional[dict]):
         ac = ActorCritic(OBS_DIM, ACTION_SPACE, self.n_agents,
-                         OBS_DIM * self.n_agents).to(self.device)
+                         OBS_DIM).to(self.device)
         if state_dict is not None:
             ac.load_state_dict(state_dict)
         ac.eval()
