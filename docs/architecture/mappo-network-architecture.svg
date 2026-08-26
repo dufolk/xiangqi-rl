@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0a1120"/><stop offset="1" stop-color="#18233a"/></linearGradient>
+    <linearGradient id="actor" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#123c57"/><stop offset="1" stop-color="#176476"/></linearGradient>
+    <linearGradient id="critic" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3e275e"/><stop offset="1" stop-color="#704084"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="7" stdDeviation="9" flood-color="#000" flood-opacity=".33"/></filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 Z" fill="#8bc5ff"/></marker>
+    <marker id="arrowP" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 Z" fill="#d8a7ef"/></marker>
+    <style>
+      .title{font:700 42px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#f4f7fb}
+      .subtitle{font:400 20px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#9eb0c9}
+      .h{font:700 24px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#fff}
+      .t{font:400 18px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#dbe4ef}
+      .s{font:400 16px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#aebed2}
+      .n{font:700 18px ui-monospace,SFMono-Regular,Menlo,monospace;fill:#fff}
+      .tag{font:700 15px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#102033}
+      .box{stroke-width:2;rx:18;filter:url(#shadow)}
+      .flow{fill:none;stroke:#8bc5ff;stroke-width:4;marker-end:url(#arrow)}
+      .flowP{fill:none;stroke:#d8a7ef;stroke-width:4;marker-end:url(#arrowP)}
+    </style>
+  </defs>
+  <rect width="1800" height="1120" fill="url(#bg)"/>
+  <circle cx="1680" cy="80" r="300" fill="#315176" opacity=".17"/><circle cx="60" cy="1080" r="330" fill="#5b3772" opacity=".15"/>
+  <text x="90" y="78" class="title">Splendor MAPPO 网络框架</text>
+  <text x="90" y="116" class="subtitle">共享 Actor 做决策 · Centralized Critic 从四个座位视角评价同一桌面</text>
+
+  <rect x="70" y="165" width="455" height="850" rx="28" fill="#101b2c" stroke="#365777" stroke-width="2"/>
+  <text x="105" y="215" class="h">278 维状态编码器</text>
+  <text x="105" y="247" class="s">颜色顺序：white · blue · green · red · black · gold</text>
+  <g filter="url(#shadow)">
+    <rect x="105" y="285" width="385" height="78" rx="16" fill="#17304a" stroke="#5082aa"/><text x="135" y="320" class="t">银行宝石</text><text x="455" y="321" text-anchor="end" class="n">6</text><text x="135" y="345" class="s">库存中的五色宝石与黄金</text>
+    <rect x="105" y="382" width="385" height="78" rx="16" fill="#17304a" stroke="#5082aa"/><text x="135" y="417" class="t">全局规则 / 团队分</text><text x="455" y="418" text-anchor="end" class="n">5</text><text x="135" y="442" class="s">目标分 · 2v2 · 两队分 · 最终轮</text>
+    <rect x="105" y="479" width="385" height="78" rx="16" fill="#17304a" stroke="#5082aa"/><text x="135" y="514" class="t">当前行动者</text><text x="455" y="515" text-anchor="end" class="n">9</text><text x="135" y="539" class="s">座位 · 宝石 · 保留卡 · 分数</text>
+    <rect x="105" y="576" width="385" height="78" rx="16" fill="#17304a" stroke="#5082aa"/><text x="135" y="611" class="t">四名玩家</text><text x="455" y="612" text-anchor="end" class="n">60</text><text x="135" y="636" class="s">4 ×（分数 + 宝石 + 折扣 + 卡数）</text>
+    <rect x="105" y="673" width="385" height="78" rx="16" fill="#17304a" stroke="#5082aa"/><text x="135" y="708" class="t">12 张桌面卡</text><text x="455" y="709" text-anchor="end" class="n">168</text><text x="135" y="733" class="s">12 ×（等级 + 奖励色 + 分数 + 费用）</text>
+    <rect x="105" y="770" width="385" height="78" rx="16" fill="#17304a" stroke="#5082aa"/><text x="135" y="805" class="t">5 位贵族</text><text x="455" y="806" text-anchor="end" class="n">30</text><text x="135" y="830" class="s">5 × 六色需求</text>
+  </g>
+  <rect x="165" y="890" width="265" height="70" rx="35" fill="#8bc5ff"/><text x="297" y="934" text-anchor="middle" class="tag" style="font-size:20px">合计 278 floats</text>
+
+  <path d="M525 460 C580 460 580 410 635 410" class="flow"/>
+  <path d="M525 720 C580 720 580 760 635 760" class="flowP"/>
+
+  <rect x="635" y="165" width="500" height="850" rx="28" fill="#101b2c" stroke="#367088" stroke-width="2"/>
+  <text x="675" y="215" class="h">共享 Actor · 决策分支</text>
+  <text x="675" y="247" class="s">四名玩家共用参数，用 Seat Embedding 区分角色</text>
+  <rect x="680" y="290" width="410" height="82" class="box" fill="url(#actor)" stroke="#65bed7"/>
+  <text x="710" y="326" class="t">Observation</text><text x="1060" y="327" text-anchor="end" class="n">278</text>
+  <text x="710" y="352" class="s">公开桌面状态</text>
+  <rect x="680" y="395" width="410" height="82" class="box" fill="url(#actor)" stroke="#65bed7"/>
+  <text x="710" y="431" class="t">Seat Embedding</text><text x="1060" y="432" text-anchor="end" class="n">4</text>
+  <text x="710" y="457" class="s">可学习座位表示</text>
+  <path d="M885 372 L885 395" class="flow"/>
+  <rect x="735" y="510" width="300" height="62" rx="16" fill="#20596d" stroke="#65bed7" stroke-width="2"/><text x="885" y="549" text-anchor="middle" class="n">Concat 282</text>
+  <path d="M885 477 L885 510" class="flow"/>
+  <path d="M885 572 L885 610" class="flow"/>
+  <rect x="735" y="610" width="300" height="62" rx="16" fill="#20596d" stroke="#65bed7" stroke-width="2"/><text x="885" y="649" text-anchor="middle" class="n">282 → 256 · ReLU</text>
+  <path d="M885 672 L885 700" class="flow"/>
+  <rect x="735" y="700" width="300" height="62" rx="16" fill="#20596d" stroke="#65bed7" stroke-width="2"/><text x="885" y="739" text-anchor="middle" class="n">256 → 256 · ReLU</text>
+  <path d="M885 762 L885 790" class="flow"/>
+  <rect x="735" y="790" width="300" height="62" rx="16" fill="#20596d" stroke="#65bed7" stroke-width="2"/><text x="885" y="829" text-anchor="middle" class="n">256 → 128 · ReLU</text>
+  <path d="M885 852 L885 880" class="flow"/>
+  <rect x="735" y="880" width="300" height="62" rx="16" fill="#8bc5ff"/><text x="885" y="919" text-anchor="middle" class="tag" style="font-size:18px">128 → 71 Action Logits</text>
+  <text x="885" y="980" text-anchor="middle" class="s">Action Mask → Categorical → 动作</text>
+
+  <path d="M1135 720 C1190 720 1190 720 1245 720" class="flowP"/>
+
+  <rect x="1245" y="165" width="485" height="850" rx="28" fill="#15182b" stroke="#8656a6" stroke-width="2"/>
+  <text x="1285" y="215" class="h">Centralized Critic · 评价分支</text>
+  <text x="1285" y="247" class="s">动作发生同一时刻的权威状态</text>
+  <rect x="1290" y="305" width="395" height="72" class="box" fill="url(#critic)" stroke="#c08adc"/>
+  <text x="1320" y="348" class="t">Global State</text><text x="1655" y="349" text-anchor="end" class="n">278</text>
+  <path d="M1488 377 L1488 420" class="flowP"/>
+  <rect x="1338" y="420" width="300" height="62" rx="16" fill="#5b356d" stroke="#c08adc" stroke-width="2"/><text x="1488" y="459" text-anchor="middle" class="n">278 → 512 · ReLU</text>
+  <path d="M1488 482 L1488 520" class="flowP"/>
+  <rect x="1338" y="520" width="300" height="62" rx="16" fill="#5b356d" stroke="#c08adc" stroke-width="2"/><text x="1488" y="559" text-anchor="middle" class="n">512 → 256 · ReLU</text>
+  <path d="M1488 582 L1488 620" class="flowP"/>
+  <rect x="1338" y="620" width="300" height="62" rx="16" fill="#5b356d" stroke="#c08adc" stroke-width="2"/><text x="1488" y="659" text-anchor="middle" class="n">256 → 128 · ReLU</text>
+  <path d="M1488 682 L1488 720" class="flowP"/>
+  <rect x="1338" y="720" width="300" height="62" rx="16" fill="#d8a7ef"/><text x="1488" y="759" text-anchor="middle" class="tag" style="font-size:18px">128 → 4 Seat Values</text>
+  <path d="M1488 782 L1488 830" class="flowP"/>
+  <rect x="1310" y="830" width="356" height="105" class="box" fill="#32223f" stroke="#c08adc"/>
+  <text x="1488" y="871" text-anchor="middle" class="t">Gather(value, agent_id)</text>
+  <text x="1488" y="904" text-anchor="middle" class="s">同一局势可有四种不同价值视角</text>
+  <text x="1488" y="980" text-anchor="middle" class="s">MSE(V_seat, Return)</text>
+
+  <rect x="650" y="1035" width="1060" height="48" rx="24" fill="#172740" stroke="#365777"/>
+  <text x="1180" y="1066" text-anchor="middle" class="t">训练：PPO-Clip + Entropy 更新 Actor ｜ GAE Return 更新 Critic ｜ 四 Seat 参数共享</text>
+</svg>

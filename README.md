@@ -87,6 +87,10 @@ export SPLENDOR_AI_MODEL="模型名称"
 
 ## 1. 网络结构
 
+![Splendor MAPPO 网络框架](docs/architecture/mappo-network-architecture.svg)
+
+> 高清文件：[`SVG`](docs/architecture/mappo-network-architecture.svg) · [`PNG`](docs/architecture/mappo-network-architecture.png)
+
 ### 共享 Actor：负责选择动作
 
 ```text
@@ -247,6 +251,10 @@ I 级 4 张 → II 级 4 张 → III 级 4 张
 固定映射使用 `(tier - 1) × 4 + position`，避免过去 tier 从 1 开始造成偏移。每一步由 `action mask` 屏蔽当前非法槽位；编码器会检测重复槽位和无法编码的合法动作并立即报错。测试会验证 71 种理论动作与 `0...70` 一一对应并可逆。
 
 ## 4. 训练管线
+
+![Splendor MAPPO 训练 Pipeline](docs/architecture/mappo-training-pipeline.svg)
+
+> 高清文件：[`SVG`](docs/architecture/mappo-training-pipeline.svg) · [`PNG`](docs/architecture/mappo-training-pipeline.png)
 
 ```text
 主进程创建 Actor + Critic

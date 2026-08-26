@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0b1220"/><stop offset="1" stop-color="#17233a"/></linearGradient>
+    <linearGradient id="worker" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#183b5b"/><stop offset="1" stop-color="#205d77"/></linearGradient>
+    <linearGradient id="trainer" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3e275e"/><stop offset="1" stop-color="#6a3980"/></linearGradient>
+    <linearGradient id="data" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#4a3519"/><stop offset="1" stop-color="#725525"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="7" stdDeviation="9" flood-color="#000" flood-opacity=".32"/></filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 Z" fill="#8bc5ff"/></marker>
+    <marker id="arrowGold" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 Z" fill="#f3c969"/></marker>
+    <style>
+      .title{font:700 42px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#f4f7fb}
+      .subtitle{font:400 20px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#9eb0c9}
+      .h{font:700 24px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#fff}
+      .t{font:400 18px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#d7e1ee}
+      .s{font:400 16px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#aebed2}
+      .tag{font:700 15px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#102033}
+      .box{stroke-width:2;rx:20;filter:url(#shadow)}
+      .flow{fill:none;stroke:#8bc5ff;stroke-width:4;marker-end:url(#arrow)}
+      .feedback{fill:none;stroke:#f3c969;stroke-width:4;stroke-dasharray:10 8;marker-end:url(#arrowGold)}
+    </style>
+  </defs>
+  <rect width="1800" height="1120" fill="url(#bg)"/>
+  <circle cx="1650" cy="80" r="280" fill="#315176" opacity=".18"/><circle cx="90" cy="1080" r="300" fill="#5d3975" opacity=".16"/>
+  <text x="90" y="78" class="title">Splendor MAPPO 训练 Pipeline</text>
+  <text x="90" y="116" class="subtitle">分布式无窗口采样 · 轨迹安全 GAE · 中央 PPO 更新 · 独立权重广播</text>
+
+  <rect x="70" y="170" width="430" height="760" rx="26" fill="#101b2c" stroke="#2d4d70" stroke-width="2"/>
+  <text x="105" y="220" class="h">CPU Worker 集群</text><text x="105" y="250" class="s">每个 Worker 持有独立牌桌与权重队列</text>
+  <g filter="url(#shadow)">
+    <rect x="105" y="285" width="360" height="150" class="box" fill="url(#worker)" stroke="#62b9dc"/>
+    <text x="135" y="328" class="h">Worker 0</text><text x="135" y="361" class="t">SplendorMAEnv · Headless</text><text x="135" y="391" class="s">持续 Episode · horizon 后完整轮截断</text>
+    <rect x="105" y="465" width="360" height="150" class="box" fill="url(#worker)" stroke="#62b9dc"/>
+    <text x="135" y="508" class="h">Worker 1</text><text x="135" y="541" class="t">共享 Actor 推理 · CPU</text><text x="135" y="571" class="s">保存动作前 obs / global state</text>
+    <rect x="105" y="645" width="360" height="150" class="box" fill="url(#worker)" stroke="#62b9dc"/>
+    <text x="135" y="688" class="h">Worker N</text><text x="135" y="721" class="t">独立随机种子与权重通道</text><text x="135" y="751" class="s">首局即加载主模型 version 0</text>
+  </g>
+  <rect x="138" y="835" width="294" height="58" rx="29" fill="#8bc5ff"/><text x="285" y="871" text-anchor="middle" class="tag">Rollout：约 horizon 个 agent-step</text>
+
+  <path d="M500 550 C560 550 565 550 625 550" class="flow"/>
+  <text x="565" y="530" text-anchor="middle" class="s">数据队列</text>
+
+  <rect x="625" y="170" width="500" height="760" rx="26" fill="#111c2c" stroke="#705538" stroke-width="2"/>
+  <text x="660" y="220" class="h">轨迹加工区</text><text x="660" y="250" class="s">先在各自边界内算清楚，再合并</text>
+  <rect x="665" y="300" width="420" height="115" class="box" fill="url(#data)" stroke="#d6a94d"/>
+  <text x="695" y="342" class="h">① 边界识别</text><text x="695" y="376" class="t">Worker / Episode / Seat 三重分组</text>
+  <path d="M875 415 L875 460" class="flow"/>
+  <rect x="665" y="460" width="420" height="145" class="box" fill="url(#data)" stroke="#d6a94d"/>
+  <text x="695" y="502" class="h">② GAE + Bootstrap</text><text x="695" y="536" class="t">γ = 0.99 · λ = 0.95</text><text x="695" y="568" class="s">终局 bootstrap = 0；普通截断读下一状态价值</text>
+  <path d="M875 605 L875 650" class="flow"/>
+  <rect x="665" y="650" width="420" height="145" class="box" fill="url(#data)" stroke="#d6a94d"/>
+  <text x="695" y="692" class="h">③ Team Reward 回填</text><text x="695" y="726" class="t">胜队两个 Seat +10 · 败队 -10</text><text x="695" y="758" class="s">写入各 Seat 最后一条动作，再独立反传</text>
+  <path d="M875 795 L875 835" class="flow"/>
+  <rect x="725" y="835" width="300" height="58" rx="29" fill="#f3c969"/><text x="875" y="871" text-anchor="middle" class="tag">合并为 PPO Batch</text>
+
+  <path d="M1125 550 C1185 550 1185 550 1245 550" class="flow"/>
+  <text x="1185" y="530" text-anchor="middle" class="s">训练张量</text>
+
+  <rect x="1245" y="170" width="485" height="760" rx="26" fill="#15182b" stroke="#7e52a1" stroke-width="2"/>
+  <text x="1280" y="220" class="h">中央 Trainer</text><text x="1280" y="250" class="s">CPU / MPS / CUDA · 共享策略更新</text>
+  <rect x="1285" y="300" width="405" height="135" class="box" fill="url(#trainer)" stroke="#ba82d4"/>
+  <text x="1315" y="342" class="h">PPO-Clip Actor 更新</text><text x="1315" y="377" class="t">ratio · clipped surrogate · entropy</text><text x="1315" y="408" class="s">71 动作 mask · 四 Seat 共享参数</text>
+  <rect x="1285" y="470" width="405" height="135" class="box" fill="url(#trainer)" stroke="#ba82d4"/>
+  <text x="1315" y="512" class="h">Centralized Critic 更新</text><text x="1315" y="547" class="t">278 当前状态 → 4 Seat Values</text><text x="1315" y="578" class="s">MSE(Return, V_seat)</text>
+  <rect x="1285" y="640" width="405" height="155" class="box" fill="url(#trainer)" stroke="#ba82d4"/>
+  <text x="1315" y="682" class="h">评估与观测</text><text x="1315" y="717" class="t">TensorBoard · Self-play Arena</text><text x="1315" y="748" class="s">Checkpoint · 胜率 · 熵 · KL · Value loss</text>
+  <rect x="1338" y="835" width="300" height="58" rx="29" fill="#d2a7e6"/><text x="1488" y="871" text-anchor="middle" class="tag">Policy Version + 1</text>
+
+  <path d="M1485 930 C1485 1035 315 1035 315 930" class="feedback"/>
+  <text x="900" y="1065" text-anchor="middle" class="t" fill="#f3c969">每个 Worker 独立 latest-only 队列：新权重不会被其他 Worker 抢走</text>
+
+  <rect x="90" y="965" width="240" height="38" rx="19" fill="#16354d"/><text x="210" y="990" text-anchor="middle" class="s">权威环境状态</text>
+  <rect x="350" y="965" width="240" height="38" rx="19" fill="#4d381c"/><text x="470" y="990" text-anchor="middle" class="s">轨迹与奖励</text>
+  <rect x="610" y="965" width="240" height="38" rx="19" fill="#422b58"/><text x="730" y="990" text-anchor="middle" class="s">模型优化</text>
+</svg>
