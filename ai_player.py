@@ -1,112 +1,117 @@
-import json
-import os
-import urllib.error
-import urllib.request
-from typing import Any, Dict, List
+"""Lightweight deterministic Xiangqi opponent used by the desktop app."""
+
+from __future__ import annotations
+
+import math
+import random
+from dataclasses import dataclass
+from typing import Optional
+
+from game_engine import (
+    ADVISOR, BLACK, CANNON, ELEPHANT, HORSE, KING, PAWN, RED, ROOK,
+    Move, XiangqiGame, iter_pieces, opponent,
+)
+
+VALUES = {KING: 100_000, ROOK: 900, CANNON: 450, HORSE: 420, ELEPHANT: 210, ADVISOR: 210, PAWN: 100}
 
 
-class GenerativeAIPlayer:
-    """OpenAI-compatible model adapter with a deterministic local strategy fallback."""
+@dataclass
+class SearchResult:
+    move: Optional[Move]
+    score: float
+    nodes: int
 
-    def __init__(self):
-        self.endpoint = os.getenv("SPLENDOR_AI_ENDPOINT", "").strip()
-        self.api_key = os.getenv("SPLENDOR_AI_API_KEY", "").strip()
-        self.model = os.getenv("SPLENDOR_AI_MODEL", "gpt-4o-mini").strip()
-        self.last_mode = "本地策略"
 
-    @property
-    def model_enabled(self) -> bool:
-        return bool(self.endpoint and self.api_key)
+class SimpleAI:
+    """Material/position alpha-beta player.
 
-    def choose_action(self, snapshot: Dict[str, Any], actions: List[Dict[str, Any]]) -> str:
-        if not actions:
-            return ""
-        if self.model_enabled:
-            try:
-                action_id = self._ask_model(snapshot, actions)
-                if action_id in {action["id"] for action in actions}:
-                    self.last_mode = "生成式模型"
-                    return action_id
-            except (OSError, ValueError, KeyError, json.JSONDecodeError, urllib.error.URLError):
-                pass
-        self.last_mode = "团队策略" if snapshot.get("team_mode") else "本地策略"
-        return self.local_choice(snapshot, actions)
+    Depth 2 is intentionally the GUI default: it responds quickly while still
+    spotting captures, checks and one-ply tactical replies.
+    """
 
-    def _ask_model(self, snapshot: Dict[str, Any], actions: List[Dict[str, Any]]) -> str:
-        prompt = {
-            "role": "你是璀璨宝石桌游高手。根据局面只从 legal_actions 选择一个 id，兼顾得分、折扣、贵族和阻止对手。",
-            "state": snapshot,
-            "legal_actions": actions,
-            "output": {"action_id": "必须精确复制一个合法 id"},
-        }
-        body = json.dumps({
-            "model": self.model,
-            "temperature": 0.35,
-            "max_tokens": 80,
-            "messages": [
-                {"role": "system", "content": "只输出 JSON，不要解释。"},
-                {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
-            ],
-        }).encode("utf-8")
-        request = urllib.request.Request(
-            self.endpoint,
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-        )
-        with urllib.request.urlopen(request, timeout=8) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        content = result["choices"][0]["message"]["content"].strip()
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1].rsplit("```", 1)[0]
-        return str(json.loads(content)["action_id"])
+    def __init__(self, depth: int = 2, seed: Optional[int] = None):
+        self.depth = max(1, min(4, depth))
+        self.rng = random.Random(seed)
+        self.nodes = 0
+
+    def choose_move(self, game: XiangqiGame) -> Optional[Move]:
+        if game.winner is not None:
+            return None
+        root = game.turn
+        moves = self._ordered_moves(game)
+        if not moves:
+            return None
+        self.nodes = 0
+        best_score = -math.inf
+        best: list[Move] = []
+        for move in moves:
+            game.push(move, validate=False)
+            score = self._search(game, self.depth - 1, -math.inf, math.inf, root)
+            game.undo()
+            if score > best_score + 1e-6:
+                best_score, best = score, [move]
+            elif abs(score - best_score) <= 1e-6:
+                best.append(move)
+        return self.rng.choice(best)
+
+    def analyze(self, game: XiangqiGame) -> SearchResult:
+        move = self.choose_move(game)
+        return SearchResult(move, self.evaluate(game, game.turn), self.nodes)
+
+    def _search(self, game: XiangqiGame, depth: int, alpha: float, beta: float, root: str) -> float:
+        self.nodes += 1
+        if game.winner is not None:
+            return 1_000_000.0 if game.winner == root else -1_000_000.0
+        if depth <= 0:
+            return self.evaluate(game, root)
+        moves = self._ordered_moves(game)
+        if not moves:
+            return self.evaluate(game, root)
+        maximizing = game.turn == root
+        if maximizing:
+            value = -math.inf
+            for move in moves:
+                game.push(move, validate=False)
+                value = max(value, self._search(game, depth - 1, alpha, beta, root))
+                game.undo()
+                alpha = max(alpha, value)
+                if alpha >= beta:
+                    break
+            return value
+        value = math.inf
+        for move in moves:
+            game.push(move, validate=False)
+            value = min(value, self._search(game, depth - 1, alpha, beta, root))
+            game.undo()
+            beta = min(beta, value)
+            if alpha >= beta:
+                break
+        return value
 
     @staticmethod
-    def local_choice(snapshot: Dict[str, Any], actions: List[Dict[str, Any]]) -> str:
-        """Score legal actions using personal progress plus 2v2 team context."""
-        team_mode = bool(snapshot.get("team_mode"))
-        target = int(snapshot.get("target_score", 15))
-        team_scores = snapshot.get("team_scores") or [0, 0]
-        current = snapshot.get("current_player", {})
-        seat = int(current.get("seat", 0))
-        own_score = int(current.get("score", 0))
-        own_team = seat % 2
-        team_gap = target - int(team_scores[own_team]) if team_mode else target - own_score
-        enemy_gap = target - int(team_scores[1 - own_team]) if team_mode else target
+    def _ordered_moves(game: XiangqiGame) -> list[Move]:
+        return sorted(
+            game.legal_moves(),
+            key=lambda move: (VALUES.get(move.captured.kind, 0) if move.captured else 0, -abs(4 - move.end[1])),
+            reverse=True,
+        )
 
-        def score(action: Dict[str, Any]) -> float:
-            kind = action.get("type")
-            points = float(action.get("points", 0))
-            noble_progress = float(action.get("noble_progress", 0))
-            enemy_threat = float(action.get("enemy_threat", 0))
-            teammate_interest = float(action.get("teammate_interest", 0))
-            if kind == "noble":
-                return 2000 + points * 100
-            if kind == "buy":
-                value = 500 + points * 90 + action.get("tier", 0) * 8 + noble_progress * 28
-                if points >= team_gap:
-                    value += 5000
-                if team_mode and enemy_gap <= 5:
-                    value += points * 35
-                return value
-            if kind == "reserve":
-                value = 100 + points * 18 + action.get("tier", 0) * 5 + enemy_threat * 75
-                if team_mode:
-                    value -= teammate_interest * 45
-                    if enemy_gap <= 5:
-                        value += enemy_threat * 80
-                return value
-            if kind == "take":
-                value = 180 + float(action.get("usefulness", 0)) * 8
-                if team_mode:
-                    value += float(action.get("deny_value", 0)) * 4
-                    value -= float(action.get("teammate_need", 0)) * 2
-                return value
-            if kind == "return":
-                return 80 - float(action.get("usefulness", 0)) * 8
-            return 0
-
-        return max(actions, key=lambda action: (score(action), action["id"]))["id"]
+    @staticmethod
+    def evaluate(game: XiangqiGame, perspective: str) -> float:
+        score = 0.0
+        for row, col, piece in iter_pieces(game.board):
+            value = float(VALUES[piece.kind])
+            if piece.kind == PAWN:
+                crossed = row <= 4 if piece.side == RED else row >= 5
+                value += 55 if crossed else 0
+                value += (4 - abs(4 - col)) * 3
+            elif piece.kind in (HORSE, CANNON):
+                value += (4 - abs(4 - col)) * 4
+            elif piece.kind == ROOK:
+                value += (4 - abs(4 - col)) * 2
+            score += value if piece.side == perspective else -value
+        if game.is_in_check(opponent(perspective)):
+            score += 35
+        if game.is_in_check(perspective):
+            score -= 45
+        return score

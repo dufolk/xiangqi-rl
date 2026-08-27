@@ -1,4 +1,5 @@
-from rl.environment import SplendorEnv, StepResult
-from rl.policy import Policy
+"""Xiangqi reinforcement-learning platform."""
 
-__all__ = ["Policy", "SplendorEnv", "StepResult"]
+from .environment import ACTION_SIZE, OBSERVATION_PLANES, StepResult, XiangqiEnv, decode_action, encode_move
+
+__all__ = ["ACTION_SIZE", "OBSERVATION_PLANES", "StepResult", "XiangqiEnv", "decode_action", "encode_move"]

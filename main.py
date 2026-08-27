@@ -1,4 +1,4 @@
-"""Splendor desktop entry point."""
+"""Xiangqi PPO Lab desktop entry point."""
 
 from app import main
 

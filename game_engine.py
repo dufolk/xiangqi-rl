@@ -1,271 +1,407 @@
-import random
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+"""UI-free Chinese chess (Xiangqi) rules engine.
 
-from card_data import STANDARD_CARD_ROWS
+The engine uses canonical coordinates: black starts at row 0, red at row 9.
+A position is a 10 x 9 board containing :class:`Piece` objects or ``None``.
+"""
 
-GEM_KEYS = ["white", "blue", "green", "red", "black"]
-ALL_GEMS = GEM_KEYS + ["gold"]
-COLOR_NAMES = ["钻石", "蓝宝石", "祖母绿", "红宝石", "黑玛瑙"]
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Iterable, Iterator, Optional
+
+ROWS, COLS = 10, 9
+RED, BLACK = "red", "black"
+SIDES = (RED, BLACK)
+KING, ADVISOR, ELEPHANT, HORSE, ROOK, CANNON, PAWN = "K", "A", "E", "H", "R", "C", "P"
+KINDS = (KING, ADVISOR, ELEPHANT, HORSE, ROOK, CANNON, PAWN)
+PIECE_NAMES = {
+    (RED, KING): "帅", (RED, ADVISOR): "仕", (RED, ELEPHANT): "相",
+    (RED, HORSE): "马", (RED, ROOK): "车", (RED, CANNON): "炮", (RED, PAWN): "兵",
+    (BLACK, KING): "将", (BLACK, ADVISOR): "士", (BLACK, ELEPHANT): "象",
+    (BLACK, HORSE): "马", (BLACK, ROOK): "车", (BLACK, CANNON): "砲", (BLACK, PAWN): "卒",
+}
+FEN_TO_PIECE = {
+    "K": (RED, KING), "A": (RED, ADVISOR), "B": (RED, ELEPHANT),
+    "N": (RED, HORSE), "R": (RED, ROOK), "C": (RED, CANNON), "P": (RED, PAWN),
+    "k": (BLACK, KING), "a": (BLACK, ADVISOR), "b": (BLACK, ELEPHANT),
+    "n": (BLACK, HORSE), "r": (BLACK, ROOK), "c": (BLACK, CANNON), "p": (BLACK, PAWN),
+}
+PIECE_TO_FEN = {value: key for key, value in FEN_TO_PIECE.items()}
+
+
+@dataclass(frozen=True)
+class Piece:
+    side: str
+    kind: str
+
+    @property
+    def name(self) -> str:
+        return PIECE_NAMES[(self.side, self.kind)]
+
+
+@dataclass(frozen=True)
+class Move:
+    start: tuple[int, int]
+    end: tuple[int, int]
+    captured: Optional[Piece] = None
+
+    @property
+    def action(self) -> int:
+        return square_index(*self.start) * 90 + square_index(*self.end)
 
 
 @dataclass
-class Card:
-    tier: int
-    bonus: str
-    points: int
-    cost: Dict[str, int]
-    art_index: int = 0
+class _Snapshot:
+    board: list[list[Optional[Piece]]]
+    turn: str
+    winner: Optional[str]
+    reason: str
+    halfmove: int
+    last_move: Optional[Move]
 
 
-@dataclass
-class Player:
-    name: str
-    color: Tuple[int, int, int]
-    gems: Dict[str, int] = field(default_factory=lambda: {key: 0 for key in ALL_GEMS})
-    cards: List[Card] = field(default_factory=list)
-    reserved: List[Optional[Card]] = field(default_factory=list)
-    nobles: List[Dict[str, int]] = field(default_factory=list)
-
-    def discount(self, gem: str) -> int:
-        return sum(card is not None and card.bonus == gem for card in self.cards)
-
-    @property
-    def points(self) -> int:
-        return sum(card.points for card in self.cards if card is not None) + 3 * len(self.nobles)
-
-    @property
-    def gem_count(self) -> int:
-        return sum(self.gems.values())
+def opponent(side: str) -> str:
+    return BLACK if side == RED else RED
 
 
-class Game:
-    def __init__(self, ai_count=3, human_seat=0, target_score=15, player_name="你", team_mode=False, rng=None):
-        self.ai_count = max(0, min(3, ai_count))
-        self.human_seat = max(0, min(3, human_seat))
-        self.team_mode = bool(team_mode)
-        self.target_score = 30 if self.team_mode else max(5, min(30, target_score))
-        self.player_name = player_name.strip() or "你"
-        self.rng = rng or random.Random()
-        self.restart()
+def in_bounds(row: int, col: int) -> bool:
+    return 0 <= row < ROWS and 0 <= col < COLS
 
-    def restart(self):
-        self.bank = {key: 7 for key in GEM_KEYS} | {"gold": 5}
-        self.decks = {tier: self.make_deck(tier) for tier in (1, 2, 3)}
-        self.table = {tier: [] for tier in (1, 2, 3)}
-        for tier in self.table:
-            for _ in range(4):
-                self.table[tier].append(self.decks[tier].pop())
-        noble_templates = [
-            {"white": 4, "blue": 4}, {"blue": 4, "green": 4},
-            {"green": 4, "red": 4}, {"red": 4, "black": 4},
-            {"black": 4, "white": 4}, {"white": 3, "blue": 3, "green": 3},
-            {"blue": 3, "green": 3, "red": 3}, {"green": 3, "red": 3, "black": 3},
-            {"red": 3, "black": 3, "white": 3}, {"black": 3, "white": 3, "blue": 3},
-        ]
-        assert all(
-            (len(noble) == 2 and set(noble.values()) == {4})
-            or (len(noble) == 3 and set(noble.values()) == {3})
-            for noble in noble_templates
-        )
-        self.nobles = self.rng.sample(noble_templates, 5)
-        colors = [(113, 184, 255), (239, 129, 139), (108, 210, 157), (226, 176, 88)]
-        ai_seats = [seat for seat in range(4) if seat != self.human_seat][:self.ai_count]
-        self.ai_seats = set(ai_seats)
-        self.players = [
-            Player(self.player_name if seat == self.human_seat else (f"AI {seat + 1}" if seat in self.ai_seats else f"玩家 {seat + 1}"), colors[seat])
-            for seat in range(4)
-        ]
-        self.turn = 0
-        self.selected_card: Optional[Tuple[str, int, int]] = None
-        self.selected_gems: Dict[str, int] = {}
-        self.phase = "action"
-        self.noble_choices: List[Dict[str, int]] = []
-        self.round_end = False
-        self.winner: Optional[Player] = None
-        self.winner_team: Optional[int] = None
-        self.message = "轮到玩家 1：选择宝石，或选中一张发展卡。"
 
-    def make_deck(self, tier):
-        rows = [row for row in STANDARD_CARD_ROWS if row["tier"] == tier]
-        cards = [
-            Card(
-                tier=row["tier"], bonus=row["bonus"], points=row["points"],
-                cost={gem: row["cost"].get(gem, 0) for gem in GEM_KEYS}, art_index=index % 12,
-            )
-            for index, row in enumerate(rows)
-        ]
-        assert len(cards) == {1: 40, 2: 30, 3: 20}[tier]
-        self.rng.shuffle(cards)
-        return cards
+def square_index(row: int, col: int) -> int:
+    if not in_bounds(row, col):
+        raise ValueError("square out of board")
+    return row * COLS + col
 
-    @property
-    def player(self):
-        return self.players[self.turn]
 
-    def card_from_ref(self, ref):
-        where, tier, index = ref
-        card = self.table[tier][index] if where == "table" else self.player.reserved[index]
-        if card is None:
-            raise ValueError("hidden card cannot be selected")
-        return card
+def action_to_squares(action: int) -> tuple[tuple[int, int], tuple[int, int]]:
+    if not 0 <= action < 8100:
+        raise ValueError("action must be in [0, 8100)")
+    start, end = divmod(action, 90)
+    return divmod(start, COLS), divmod(end, COLS)
 
-    def can_afford(self, card):
-        missing = sum(max(0, card.cost[gem] - self.player.discount(gem) - self.player.gems[gem]) for gem in GEM_KEYS)
-        return missing <= self.player.gems["gold"]
 
-    def take_gem(self, gem):
-        if self.phase == "return":
-            if self.player.gems[gem] <= 0:
-                return
-            self.player.gems[gem] -= 1
-            self.bank[gem] += 1
-            self.message = f"请归还宝石，手中还有 {self.player.gem_count} 枚（上限 10）。"
-            if self.player.gem_count <= 10:
-                self.finish_turn()
+def standard_board() -> list[list[Optional[Piece]]]:
+    board: list[list[Optional[Piece]]] = [[None for _ in range(COLS)] for _ in range(ROWS)]
+    back = (ROOK, HORSE, ELEPHANT, ADVISOR, KING, ADVISOR, ELEPHANT, HORSE, ROOK)
+    for col, kind in enumerate(back):
+        board[0][col] = Piece(BLACK, kind)
+        board[9][col] = Piece(RED, kind)
+    for col in (1, 7):
+        board[2][col] = Piece(BLACK, CANNON)
+        board[7][col] = Piece(RED, CANNON)
+    for col in range(0, COLS, 2):
+        board[3][col] = Piece(BLACK, PAWN)
+        board[6][col] = Piece(RED, PAWN)
+    return board
+
+
+class XiangqiGame:
+    """Complete mutable game state with legal move validation and undo."""
+
+    def __init__(self, board: Optional[list[list[Optional[Piece]]]] = None, turn: str = RED):
+        self.board = self._copy_board(board if board is not None else standard_board())
+        self.turn = turn
+        self.winner: Optional[str] = None
+        self.reason = ""
+        self.halfmove = 0
+        self.last_move: Optional[Move] = None
+        self.history: list[_Snapshot] = []
+        self._validate_shape()
+
+    @staticmethod
+    def _copy_board(board: list[list[Optional[Piece]]]) -> list[list[Optional[Piece]]]:
+        return [row[:] for row in board]
+
+    def _validate_shape(self) -> None:
+        if len(self.board) != ROWS or any(len(row) != COLS for row in self.board):
+            raise ValueError("board must be 10 x 9")
+        if self.turn not in SIDES:
+            raise ValueError("turn must be red or black")
+
+    def reset(self) -> None:
+        self.board = standard_board()
+        self.turn = RED
+        self.winner = None
+        self.reason = ""
+        self.halfmove = 0
+        self.last_move = None
+        self.history.clear()
+
+    def clear(self) -> None:
+        self.board = [[None for _ in range(COLS)] for _ in range(ROWS)]
+        self.winner = None
+        self.reason = ""
+        self.halfmove = 0
+        self.last_move = None
+        self.history.clear()
+
+    def clone(self, with_history: bool = False) -> "XiangqiGame":
+        game = XiangqiGame(self.board, self.turn)
+        game.winner = self.winner
+        game.reason = self.reason
+        game.halfmove = self.halfmove
+        game.last_move = self.last_move
+        if with_history:
+            game.history = list(self.history)
+        return game
+
+    def piece_at(self, square: tuple[int, int]) -> Optional[Piece]:
+        return self.board[square[0]][square[1]]
+
+    def set_piece(self, row: int, col: int, piece: Optional[Piece]) -> None:
+        if not in_bounds(row, col):
+            raise ValueError("square out of board")
+        self.board[row][col] = piece
+        self.winner = None
+        self.reason = ""
+        self.history.clear()
+        self.last_move = None
+
+    def king_position(self, side: str) -> Optional[tuple[int, int]]:
+        for row in range(ROWS):
+            for col in range(COLS):
+                piece = self.board[row][col]
+                if piece == Piece(side, KING):
+                    return row, col
+        return None
+
+    def validate_position(self) -> list[str]:
+        errors: list[str] = []
+        for side, label in ((RED, "红方"), (BLACK, "黑方")):
+            kings = sum(piece == Piece(side, KING) for row in self.board for piece in row)
+            if kings != 1:
+                errors.append(f"{label}必须恰有一个{PIECE_NAMES[(side, KING)]}")
+        if not errors and self.generals_facing():
+            errors.append("帅与将不能直接照面")
+        return errors
+
+    def generals_facing(self) -> bool:
+        red = self.king_position(RED)
+        black = self.king_position(BLACK)
+        if red is None or black is None or red[1] != black[1]:
+            return False
+        col = red[1]
+        lo, hi = sorted((red[0], black[0]))
+        return all(self.board[row][col] is None for row in range(lo + 1, hi))
+
+    def _palace_contains(self, side: str, row: int, col: int) -> bool:
+        return 3 <= col <= 5 and ((7 <= row <= 9) if side == RED else (0 <= row <= 2))
+
+    def _own_half(self, side: str, row: int) -> bool:
+        return row >= 5 if side == RED else row <= 4
+
+    def _ray_moves(self, row: int, col: int, piece: Piece, cannon: bool) -> Iterator[Move]:
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            crossed = False
+            nr, nc = row + dr, col + dc
+            while in_bounds(nr, nc):
+                target = self.board[nr][nc]
+                if not cannon:
+                    if target is None:
+                        yield Move((row, col), (nr, nc))
+                    else:
+                        if target.side != piece.side:
+                            yield Move((row, col), (nr, nc), target)
+                        break
+                elif not crossed:
+                    if target is None:
+                        yield Move((row, col), (nr, nc))
+                    else:
+                        crossed = True
+                elif target is not None:
+                    if target.side != piece.side:
+                        yield Move((row, col), (nr, nc), target)
+                    break
+                nr, nc = nr + dr, nc + dc
+
+    def pseudo_moves_from(self, row: int, col: int) -> Iterator[Move]:
+        piece = self.board[row][col]
+        if piece is None:
             return
-        if self.phase != "action" or gem == "gold" or self.bank[gem] <= 0:
+        if piece.kind == ROOK:
+            yield from self._ray_moves(row, col, piece, False)
             return
-        if gem in self.selected_gems:
-            if self.selected_gems[gem] == 1 and len(self.selected_gems) == 1 and self.bank[gem] >= 4:
-                self.selected_gems[gem] = 2
-            else:
-                self.selected_gems.pop(gem)
-        elif len(self.selected_gems) < 3:
-            self.selected_gems[gem] = 1
-        self.message = "已选 " + ("、".join(f"{COLOR_NAMES[GEM_KEYS.index(key)]} ×{value}" for key, value in self.selected_gems.items()) or "0 枚")
+        if piece.kind == CANNON:
+            yield from self._ray_moves(row, col, piece, True)
+            return
 
-    def confirm_gems(self):
-        if self.phase != "action" or not self.selected_gems:
-            self.message = "请先选择宝石。"
-            return
-        total = sum(self.selected_gems.values())
-        available_colors = sum(self.bank[gem] > 0 for gem in GEM_KEYS)
-        distinct_take = all(amount == 1 for amount in self.selected_gems.values())
-        valid_distinct = distinct_take and total == min(3, available_colors)
-        valid_double = total == 2 and len(self.selected_gems) == 1 and self.bank[next(iter(self.selected_gems))] >= 4
-        if not (valid_distinct or valid_double):
-            self.message = "规则：尽量拿 3 种不同宝石；不足 3 种时可拿完现有颜色，或从库存 ≥4 的同色拿 2 枚。"
-            return
-        if any(self.bank[gem] < amount for gem, amount in self.selected_gems.items()):
-            self.message = "宝石库存不足。"
-            return
-        for gem, amount in self.selected_gems.items():
-            self.bank[gem] -= amount
-            self.player.gems[gem] += amount
-        self.selected_gems = {}
-        self.after_action()
+        destinations: list[tuple[int, int]] = []
+        if piece.kind == KING:
+            destinations = [(row + dr, col + dc) for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1))]
+            destinations = [(r, c) for r, c in destinations if self._palace_contains(piece.side, r, c)]
+            enemy_king = self.king_position(opponent(piece.side))
+            if enemy_king and enemy_king[1] == col:
+                lo, hi = sorted((row, enemy_king[0]))
+                if all(self.board[r][col] is None for r in range(lo + 1, hi)):
+                    destinations.append(enemy_king)
+        elif piece.kind == ADVISOR:
+            destinations = [(row + dr, col + dc) for dr, dc in ((1, 1), (1, -1), (-1, 1), (-1, -1))]
+            destinations = [(r, c) for r, c in destinations if self._palace_contains(piece.side, r, c)]
+        elif piece.kind == ELEPHANT:
+            for dr, dc in ((2, 2), (2, -2), (-2, 2), (-2, -2)):
+                nr, nc = row + dr, col + dc
+                if in_bounds(nr, nc) and self._own_half(piece.side, nr) and self.board[row + dr // 2][col + dc // 2] is None:
+                    destinations.append((nr, nc))
+        elif piece.kind == HORSE:
+            for dr, dc, lr, lc in ((2, 1, 1, 0), (2, -1, 1, 0), (-2, 1, -1, 0), (-2, -1, -1, 0),
+                                        (1, 2, 0, 1), (-1, 2, 0, 1), (1, -2, 0, -1), (-1, -2, 0, -1)):
+                nr, nc = row + dr, col + dc
+                if in_bounds(nr, nc) and self.board[row + lr][col + lc] is None:
+                    destinations.append((nr, nc))
+        elif piece.kind == PAWN:
+            forward = -1 if piece.side == RED else 1
+            destinations.append((row + forward, col))
+            crossed = row <= 4 if piece.side == RED else row >= 5
+            if crossed:
+                destinations.extend(((row, col - 1), (row, col + 1)))
 
-    def reserve_selected(self):
-        if self.phase != "action" or not self.selected_card:
-            self.message = "请先选择桌面上的发展卡。"
-            return
-        if len(self.player.reserved) >= 3:
-            self.message = "每位玩家最多保留 3 张发展卡。"
-            return
-        where, tier, index = self.selected_card
-        if where != "table":
-            self.message = "保留只适用于桌面发展卡。"
-            return
-        card = self.table[tier].pop(index)
-        self.player.reserved.append(card)
-        if self.decks[tier]:
-            self.table[tier].insert(index, self.decks[tier].pop())
-        self._grant_reserve_gold()
-        self.selected_card = None
-        self.after_action()
+        for nr, nc in destinations:
+            if not in_bounds(nr, nc):
+                continue
+            target = self.board[nr][nc]
+            if target is None or target.side != piece.side:
+                yield Move((row, col), (nr, nc), target)
 
-    def reserve_from_deck(self, tier):
-        if self.phase != "action" or tier not in self.decks or not self.decks[tier]:
-            return
-        if len(self.player.reserved) >= 3:
-            self.message = "每位玩家最多保留 3 张发展卡。"
-            return
-        self.player.reserved.append(self.decks[tier].pop())
-        self._grant_reserve_gold()
-        self.selected_card = None
-        self.after_action()
+    def _attacks_square(self, side: str, target: tuple[int, int]) -> bool:
+        for row in range(ROWS):
+            for col in range(COLS):
+                piece = self.board[row][col]
+                if piece is not None and piece.side == side:
+                    if any(move.end == target for move in self.pseudo_moves_from(row, col)):
+                        return True
+        return False
 
-    def _grant_reserve_gold(self):
-        if self.bank["gold"]:
-            self.bank["gold"] -= 1
-            self.player.gems["gold"] += 1
+    def is_in_check(self, side: str) -> bool:
+        king = self.king_position(side)
+        return king is None or self._attacks_square(opponent(side), king)
 
-    def buy_selected(self):
-        if self.phase != "action" or not self.selected_card:
-            self.message = "请先选中一张桌面或保留的发展卡。"
-            return
-        card = self.card_from_ref(self.selected_card)
-        if not self.can_afford(card):
-            self.message = "宝石和折扣不足，暂时买不起这张卡。"
-            return
-        for gem in GEM_KEYS:
-            need = max(0, card.cost[gem] - self.player.discount(gem))
-            paid = min(need, self.player.gems[gem])
-            self.player.gems[gem] -= paid
-            self.bank[gem] += paid
-            need -= paid
-            if need:
-                self.player.gems["gold"] -= need
-                self.bank["gold"] += need
-        where, tier, index = self.selected_card
-        if where == "table":
-            self.table[tier].pop(index)
-            if self.decks[tier]:
-                self.table[tier].insert(index, self.decks[tier].pop())
+    def _is_legal(self, move: Move, side: str) -> bool:
+        moving = self.board[move.start[0]][move.start[1]]
+        captured = self.board[move.end[0]][move.end[1]]
+        self.board[move.end[0]][move.end[1]] = moving
+        self.board[move.start[0]][move.start[1]] = None
+        legal = not self.is_in_check(side)
+        self.board[move.start[0]][move.start[1]] = moving
+        self.board[move.end[0]][move.end[1]] = captured
+        return legal
+
+    def legal_moves(self, side: Optional[str] = None) -> list[Move]:
+        side = side or self.turn
+        if self.king_position(side) is None:
+            return []
+        moves: list[Move] = []
+        for row in range(ROWS):
+            for col in range(COLS):
+                piece = self.board[row][col]
+                if piece is not None and piece.side == side:
+                    moves.extend(move for move in self.pseudo_moves_from(row, col) if self._is_legal(move, side))
+        return moves
+
+    def legal_moves_from(self, square: tuple[int, int]) -> list[Move]:
+        piece = self.piece_at(square)
+        if piece is None or piece.side != self.turn or self.winner is not None:
+            return []
+        return [move for move in self.pseudo_moves_from(*square) if self._is_legal(move, self.turn)]
+
+    def push(self, move: Move, validate: bool = True) -> Move:
+        piece = self.piece_at(move.start)
+        if piece is None:
+            raise ValueError("no piece at move start")
+        if validate:
+            legal = next((candidate for candidate in self.legal_moves_from(move.start) if candidate.end == move.end), None)
+            if legal is None:
+                raise ValueError("illegal move")
+            move = legal
+        self.history.append(_Snapshot(self._copy_board(self.board), self.turn, self.winner, self.reason, self.halfmove, self.last_move))
+        captured = self.piece_at(move.end)
+        played = Move(move.start, move.end, captured)
+        self.board[move.end[0]][move.end[1]] = piece
+        self.board[move.start[0]][move.start[1]] = None
+        self.last_move = played
+        self.halfmove += 1
+        self.turn = opponent(self.turn)
+        if captured is not None and captured.kind == KING:
+            self.winner = piece.side
+            self.reason = "将帅被擒"
+        elif not self.legal_moves(self.turn):
+            self.winner = piece.side
+            self.reason = "将死" if self.is_in_check(self.turn) else "困毙"
+        return played
+
+    def undo(self) -> bool:
+        if not self.history:
+            return False
+        state = self.history.pop()
+        self.board = state.board
+        self.turn = state.turn
+        self.winner = state.winner
+        self.reason = state.reason
+        self.halfmove = state.halfmove
+        self.last_move = state.last_move
+        return True
+
+    def to_fen(self) -> str:
+        rows: list[str] = []
+        for board_row in self.board:
+            empty = 0
+            text = ""
+            for piece in board_row:
+                if piece is None:
+                    empty += 1
+                else:
+                    if empty:
+                        text += str(empty)
+                        empty = 0
+                    text += PIECE_TO_FEN[(piece.side, piece.kind)]
+            if empty:
+                text += str(empty)
+            rows.append(text)
+        return "/".join(rows) + (" w" if self.turn == RED else " b")
+
+    @classmethod
+    def from_fen(cls, fen: str) -> "XiangqiGame":
+        parts = fen.strip().split()
+        if not parts:
+            raise ValueError("empty FEN")
+        ranks = parts[0].split("/")
+        if len(ranks) != ROWS:
+            raise ValueError("FEN must contain 10 ranks")
+        board: list[list[Optional[Piece]]] = []
+        for rank in ranks:
+            row: list[Optional[Piece]] = []
+            for char in rank:
+                if char.isdigit():
+                    row.extend([None] * int(char))
+                elif char in FEN_TO_PIECE:
+                    row.append(Piece(*FEN_TO_PIECE[char]))
+                else:
+                    raise ValueError(f"invalid FEN piece: {char}")
+            if len(row) != COLS:
+                raise ValueError("each FEN rank must contain 9 files")
+            board.append(row)
+        turn = RED if len(parts) < 2 or parts[1].lower() in ("w", "r", "red") else BLACK
+        return cls(board, turn)
+
+    def move_text(self, move: Move) -> str:
+        piece = self.piece_at(move.start) or self.piece_at(move.end)
+        if piece is None:
+            return ""
+        files = "九八七六五四三二一" if piece.side == RED else "一二三四五六七八九"
+        start_file = files[move.start[1]]
+        end_file = files[move.end[1]]
+        delta = abs(move.end[0] - move.start[0])
+        if move.start[0] == move.end[0]:
+            verb, suffix = "平", end_file
         else:
-            self.player.reserved.pop(index)
-        self.player.cards.append(card)
-        self.selected_card = None
-        self.check_nobles()
+            forward = move.end[0] < move.start[0] if piece.side == RED else move.end[0] > move.start[0]
+            verb = "进" if forward else "退"
+            suffix = end_file if piece.kind in (HORSE, ELEPHANT, ADVISOR) else "一二三四五六七八九"[delta - 1]
+        return f"{piece.name}{start_file}{verb}{suffix}"
 
-    def check_nobles(self):
-        eligible = [noble for noble in self.nobles if all(self.player.discount(gem) >= noble.get(gem, 0) for gem in GEM_KEYS)]
-        if eligible:
-            self.phase = "noble"
-            self.noble_choices = eligible
-            self.message = "你满足了贵族条件：请选择一位贵族拜访。"
-        else:
-            self.after_action()
 
-    def choose_noble(self, noble):
-        if self.phase != "noble" or noble not in self.noble_choices:
-            return
-        self.player.nobles.append(noble)
-        self.nobles.remove(noble)
-        self.noble_choices = []
-        self.after_action()
-
-    def after_action(self):
-        if self.player.gem_count > 10:
-            self.phase = "return"
-            self.message = f"手中有 {self.player.gem_count} 枚宝石，请点击宝石归还至 10 枚。"
-        else:
-            self.finish_turn()
-
-    def team_score(self, team):
-        return sum(self.players[seat].points for seat in range(team, len(self.players), 2))
-
-    def finish_turn(self):
-        reached_target = any(self.team_score(team) >= self.target_score for team in (0, 1)) if self.team_mode else self.player.points >= self.target_score
-        if reached_target:
-            self.round_end = True
-        self.turn = (self.turn + 1) % len(self.players)
-        if self.turn == 0 and self.round_end:
-            if self.team_mode:
-                scores = [self.team_score(0), self.team_score(1)]
-                team_cards = [sum(len(self.players[seat].cards) for seat in range(team, len(self.players), 2)) for team in (0, 1)]
-                self.winner_team = max((0, 1), key=lambda team: (scores[team], -team_cards[team]))
-                self.winner = self.players[self.winner_team]
-                self.message = f"游戏结束：{self.winner_team + 1} 队以 {scores[self.winner_team]} 分获胜！"
-            else:
-                best = max(player.points for player in self.players)
-                candidates = [player for player in self.players if player.points == best]
-                self.winner = min(candidates, key=lambda player: len(player.cards))
-                self.message = f"游戏结束：{self.winner.name} 获胜！"
-            self.phase = "over"
-            return
-        self.phase = "action"
-        self.selected_gems = {}
-        self.selected_card = None
-        self.message = f"轮到 {self.player.name}：选择宝石，或选中一张发展卡。"
+def iter_pieces(board: Iterable[Iterable[Optional[Piece]]]) -> Iterator[tuple[int, int, Piece]]:
+    for row, rank in enumerate(board):
+        for col, piece in enumerate(rank):
+            if piece is not None:
+                yield row, col, piece

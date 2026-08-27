@@ -1,55 +1,72 @@
 import unittest
 
-from ai_player import GenerativeAIPlayer
-from game_ai import legal_actions, observation
-from game_engine import Card, GEM_KEYS, Game
-from rl.environment import SplendorEnv
-from state_codec import game_from_data, game_to_data
+from ai_player import SimpleAI
+from game_engine import BLACK, CANNON, ELEPHANT, HORSE, KING, PAWN, RED, ROOK, Move, Piece, XiangqiGame
 
 
-class GameEngineTests(unittest.TestCase):
-    def test_standard_deck_sizes(self):
-        game = Game(rng=__import__("random").Random(1))
-        self.assertEqual({tier: len(game.decks[tier]) + len(game.table[tier]) for tier in (1, 2, 3)}, {1: 40, 2: 30, 3: 20})
+class XiangqiEngineTests(unittest.TestCase):
+    def test_standard_position_and_fen_round_trip(self):
+        game = XiangqiGame()
+        self.assertEqual(sum(piece is not None for row in game.board for piece in row), 32)
+        restored = XiangqiGame.from_fen(game.to_fen())
+        self.assertEqual(restored.to_fen(), game.to_fen())
+        self.assertEqual(restored.validate_position(), [])
 
-    def test_team_mode_uses_alternating_seats_and_thirty_points(self):
-        game = Game(team_mode=True)
-        self.assertEqual(game.target_score, 30)
-        game.players[0].cards.append(Card(3, "white", 16, {gem: 0 for gem in GEM_KEYS}))
-        game.players[2].cards.append(Card(3, "blue", 14, {gem: 0 for gem in GEM_KEYS}))
-        self.assertEqual(game.team_score(0), 30)
+    def test_horse_leg_is_blocked(self):
+        game = XiangqiGame()
+        starts = {move.end for move in game.legal_moves_from((9, 1))}
+        self.assertIn((7, 0), starts)
+        self.assertIn((7, 2), starts)
+        game.set_piece(8, 1, Piece(RED, PAWN))
+        self.assertEqual(game.legal_moves_from((9, 1)), [])
 
-    def test_team_heuristic_is_deterministic_and_knows_teammates(self):
-        game = Game(team_mode=True)
-        game.turn = 1
-        state = observation(game)
-        actions = legal_actions(game)
-        policy = GenerativeAIPlayer()
-        self.assertEqual(state["players"][3]["relation"], "teammate")
-        self.assertEqual(policy.local_choice(state, actions), policy.local_choice(state, actions))
+    def test_cannon_requires_exactly_one_screen_to_capture(self):
+        game = XiangqiGame()
+        game.clear()
+        game.set_piece(9, 4, Piece(RED, KING))
+        game.set_piece(0, 3, Piece(BLACK, KING))
+        game.set_piece(5, 0, Piece(RED, CANNON))
+        game.set_piece(3, 0, Piece(RED, PAWN))
+        game.set_piece(1, 0, Piece(BLACK, ROOK))
+        ends = {move.end for move in game.legal_moves_from((5, 0))}
+        self.assertIn((1, 0), ends)
+        self.assertNotIn((2, 0), ends)
 
-    def test_network_projection_hides_other_reserved_cards(self):
-        game = Game()
-        game.players[0].reserved.append(game.decks[1].pop())
-        game.players[1].reserved.append(game.decks[2].pop())
-        payload = game_to_data(game, viewer_seat=1)
-        self.assertEqual(payload["players"][0]["reserved"], [None])
-        self.assertIsInstance(payload["players"][1]["reserved"][0], dict)
-        restored = game_from_data(payload)
-        self.assertIsNone(restored.players[0].reserved[0])
+    def test_elephant_cannot_cross_river(self):
+        game = XiangqiGame()
+        game.clear()
+        game.set_piece(9, 4, Piece(RED, KING))
+        game.set_piece(0, 4, Piece(BLACK, KING))
+        game.set_piece(5, 4, Piece(RED, PAWN))
+        game.set_piece(5, 2, Piece(RED, ELEPHANT))
+        ends = {move.end for move in game.legal_moves_from((5, 2))}
+        self.assertNotIn((3, 4), ends)
+        self.assertIn((7, 4), ends)
 
-    def test_training_environment_seed_is_reproducible(self):
-        first = SplendorEnv(team_mode=True, seed=7)
-        second = SplendorEnv(team_mode=True, seed=7)
-        first.reset()
-        second.reset()
-        self.assertEqual(
-            [[card.cost for card in first.game.table[tier]] for tier in (1, 2, 3)],
-            [[card.cost for card in second.game.table[tier]] for tier in (1, 2, 3)],
-        )
-        action = first.legal_actions()[0]["id"]
-        result = first.step(action)
-        self.assertIn("acting_team", result.info)
+    def test_move_cannot_expose_flying_generals(self):
+        game = XiangqiGame()
+        game.clear()
+        game.set_piece(9, 4, Piece(RED, KING))
+        game.set_piece(0, 4, Piece(BLACK, KING))
+        game.set_piece(5, 4, Piece(RED, ROOK))
+        ends = {move.end for move in game.legal_moves_from((5, 4))}
+        self.assertNotIn((5, 3), ends)
+        self.assertNotIn((5, 5), ends)
+
+    def test_push_and_undo_restore_position(self):
+        game = XiangqiGame()
+        before = game.to_fen()
+        move = next(move for move in game.legal_moves_from((6, 0)) if move.end == (5, 0))
+        game.push(move)
+        self.assertEqual(game.turn, BLACK)
+        self.assertTrue(game.undo())
+        self.assertEqual(game.to_fen(), before)
+
+    def test_simple_ai_returns_legal_move(self):
+        game = XiangqiGame()
+        move = SimpleAI(depth=1, seed=1).choose_move(game)
+        self.assertIsNotNone(move)
+        self.assertIn(move, game.legal_moves())
 
 
 if __name__ == "__main__":
