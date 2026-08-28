@@ -2,6 +2,8 @@
 __pycache__/
 *.pyc
 .DS_Store
+tensorboard.log
+*.log
 runs/
 checkpoints/
 *.pt
