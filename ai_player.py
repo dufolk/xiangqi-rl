@@ -1,10 +1,16 @@
-"""Lightweight deterministic Xiangqi opponent used by the desktop app."""
+"""Xiangqi opponents used by the desktop app.
+
+``SimpleAI`` is the old material/positional alpha-beta search (kept for tests
+and as a fallback). ``PPOAI`` is the production opponent: it loads the trained
+PPO actor-critic network and picks moves from the canonical 16×10×9 policy.
+"""
 
 from __future__ import annotations
 
 import math
 import random
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from game_engine import (
@@ -13,6 +19,15 @@ from game_engine import (
 )
 
 VALUES = {KING: 100_000, ROOK: 900, CANNON: 450, HORSE: 420, ELEPHANT: 210, ADVISOR: 210, PAWN: 100}
+
+
+def latest_checkpoint(directory: str = "checkpoints") -> Optional[Path]:
+    """Return the most recently modified ``*.pt``/``*.pth`` checkpoint, if any."""
+    path = Path(directory)
+    if not path.is_dir():
+        return None
+    candidates = sorted(path.glob("*.pt")) + sorted(path.glob("*.pth"))
+    return max(candidates, key=lambda item: item.stat().st_mtime) if candidates else None
 
 
 @dataclass
@@ -115,3 +130,90 @@ class SimpleAI:
         if game.is_in_check(perspective):
             score -= 45
         return score
+
+
+class PPOAI:
+    """In-game opponent backed by the trained PPO actor-critic network.
+
+    The network is loaded lazily on the first move request (so the GUI starts
+    instantly even before the weights are read) and reused for every later
+    decision. Observations and action masks are produced from the canonical
+    16×10×9 environment so the model always sees the side-to-move at the
+    bottom of the board.
+
+    ``depth`` maps onto three strength levels:
+      * 1 (萌新): stochastic sampling with a high temperature (weaker, varied);
+      * 2 (进阶): stochastic sampling with a mild temperature;
+      * 3 (高手): deterministic greedy play (best policy move).
+    """
+
+    def __init__(self, checkpoint: Optional[str] = None, depth: int = 2):
+        self.depth = max(1, min(3, depth))
+        self.checkpoint_path = Path(checkpoint) if checkpoint else latest_checkpoint()
+        self._model = None
+        self._device = None
+        self.load_error: Optional[str] = None
+        from rl.environment import XiangqiEnv
+
+        self._env = XiangqiEnv()
+
+    def _ensure_loaded(self) -> bool:
+        if self._model is not None:
+            return True
+        import torch
+
+        try:
+            from rl.model import build_model
+
+            device = torch.device(
+                "cuda" if torch.cuda.is_available()
+                else "mps" if torch.backends.mps.is_available()
+                else "cpu"
+            )
+            model = build_model()
+            if self.checkpoint_path and self.checkpoint_path.is_file():
+                checkpoint = torch.load(self.checkpoint_path, map_location=device)
+                if not isinstance(checkpoint, dict) or "model" not in checkpoint:
+                    raise ValueError(f"无效的 PPO 检查点：{self.checkpoint_path}")
+                model.load_state_dict(checkpoint["model"], strict=True)
+            else:
+                self.load_error = "未找到训练权重，使用随机初始化的 PPO 网络（走法接近随机）"
+            model.to(device).eval()
+            self._model = model
+            self._device = device
+            return True
+        except Exception as exc:  # noqa: BLE001 - surface load failures to the UI
+            self.load_error = f"加载 PPO 模型失败：{exc}"
+            return False
+
+    def choose_move(self, game: XiangqiGame) -> Optional[Move]:
+        if game.winner is not None:
+            return None
+        if not self._ensure_loaded():
+            return self._fallback_move(game)
+
+        import torch
+        from torch.distributions import Categorical
+        from rl.environment import decode_action, raw_square
+
+        self._env.game = game
+        observation = torch.from_numpy(self._env.observe()).unsqueeze(0).to(self._device)
+        mask = torch.from_numpy(self._env.action_mask()).unsqueeze(0).to(self._device)
+        with torch.no_grad():
+            logits, _ = self._model(observation, mask)
+            logits = logits.squeeze(0)
+        if self.depth >= 3:
+            action = int(torch.argmax(logits).item())
+        else:
+            temperature = 1.8 if self.depth == 1 else 1.0
+            action = int(Categorical(logits=logits / temperature).sample().item())
+
+        canonical_start, canonical_end = decode_action(action)
+        start = raw_square(canonical_start, game.turn)
+        end = raw_square(canonical_end, game.turn)
+        return next((move for move in game.legal_moves_from(start) if move.end == end), None)
+
+    @staticmethod
+    def _fallback_move(game: XiangqiGame) -> Optional[Move]:
+        moves = game.legal_moves()
+        return random.choice(moves) if moves else None

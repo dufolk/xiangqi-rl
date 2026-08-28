@@ -13,7 +13,7 @@ os.environ.setdefault("SDL_HINT_VIDEO_HIGHDPI_DISABLED", "0")
 
 import pygame
 
-from ai_player import SimpleAI
+from ai_player import PPOAI
 from game_engine import (
     ADVISOR, BLACK, CANNON, ELEPHANT, HORSE, KING, KINDS, PAWN, RED, ROOK,
     Move, Piece, XiangqiGame,
@@ -193,7 +193,7 @@ class XiangqiApp:
         self.victory_art: dict[str, Optional[pygame.Surface]] = {}
         self.activate_skin("anime")
         self.game = XiangqiGame()
-        self.ai = SimpleAI(depth=2)
+        self.ai = PPOAI(depth=2)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="xiangqi-ai")
         self.ai_future: Optional[Future] = None
         self.ai_position = ""
@@ -1315,7 +1315,9 @@ class XiangqiApp:
             future, self.ai_future = self.ai_future, None
             try:
                 move = future.result()
-                if move and self.ai_position == self.game.to_fen():
+                if self.ai.load_error:
+                    self.message = f"PPO 模型：{self.ai.load_error}"
+                elif move and self.ai_position == self.game.to_fen():
                     self.play_move(move)
             except Exception as exc:
                 self.message = f"AI 计算失败：{exc}"
