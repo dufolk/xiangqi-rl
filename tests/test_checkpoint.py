@@ -27,6 +27,7 @@ class CheckpointTests(unittest.TestCase):
                 "completed_episodes": 23,
                 "observation_shape": (16, 10, 9),
                 "action_size": 8100,
+                "policy_format": "autoregressive_cross_attention_pointer_v1",
             }, checkpoint_path)
             restored_model = build_model(channels=16, blocks=1, pair_width=8).to(device)
             restored_optimizer = torch.optim.Adam(restored_model.parameters(), lr=1e-3)

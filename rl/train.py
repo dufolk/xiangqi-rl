@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import argparse
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+from rl.opponents import ModelOpponent
+from rl.search import SearchOpponent
 
 
 @dataclass
@@ -56,6 +60,11 @@ def restore_checkpoint(torch, model, optimizer, device, resume: Path) -> dict[st
         raise ValueError("checkpoint observation shape is incompatible with the current 16×10×9 environment")
     if int(checkpoint.get("action_size", 8100)) != 8100:
         raise ValueError("checkpoint action space is incompatible with the current 8100-action environment")
+    if checkpoint.get("policy_format") != "autoregressive_cross_attention_pointer_v1":
+        raise ValueError(
+            "checkpoint policy is incompatible with the autoregressive cross-attention pointer model; "
+            "start a new run or use a checkpoint trained with this policy format"
+        )
     model.load_state_dict(checkpoint["model"], strict=True)
     if "optimizer" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -82,6 +91,10 @@ def train(
     save_interval: int = 10,
     log_interval: int = 1,
     resume: Optional[Path] = None,
+    opponent=None,
+    target_win_rate: float = 1.0,
+    win_rate_window: int = 100,
+    min_updates_before_stop: int = 10,
 ) -> None:
     """Train with batch inference in the main process and parallel env workers.
 
@@ -113,13 +126,22 @@ def train(
         resumed_from = str(resume.resolve())
     else:
         starting_update = 0
+    self_play = opponent is None
+    # Self-play alternates viewpoints, so the opponent's value is the negation of
+    # ours; when facing a fixed search opponent the observation stays on our side,
+    # so the bootstrap value keeps its sign.
+    next_value_sign = -1.0 if self_play else 1.0
     current_episodes = [EpisodeStats() for _ in range(num_envs)]
+    agent_wins = 0
+    agent_win_ema = 0.0
+    recent_outcomes: deque[float] = deque(maxlen=win_rate_window)
+    stop_training = False
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     batch_size = num_envs * rollout_steps
 
     log_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=str(log_dir))
-    writer.add_text("run/config", "\n".join((
+    writer.add_text("运行配置", "\n".join((
         f"device: {device}", f"seed: {seed}", f"updates_to_run: {updates}",
         f"starting_update: {starting_update}", f"resume: {resumed_from}",
         f"num_envs: {num_envs}", f"rollout_steps_per_env: {rollout_steps}", f"batch_size: {batch_size}",
@@ -127,16 +149,17 @@ def train(
         f"gae_lambda: {gae_lambda}", f"parameters: {parameter_count:,}",
         "collection: spawned subprocess environments; batched learner inference in main process",
         "reward: terminal-only (+1 for a winning terminal move; 0 otherwise)",
+        f"opponent_mode: {'self-play' if self_play else (f'search(depth={opponent.depth})' if hasattr(opponent, 'depth') else f'model({opponent.model_path})')}",
     )))
-    writer.add_scalar("model/parameter_count", parameter_count, starting_update)
-    writer.add_scalar("model/parameter_memory_mb", parameter_count * 4 / 1024 / 1024, starting_update)
-    writer.add_scalar("system/num_envs", num_envs, starting_update)
-    writer.add_scalar("system/ppo_batch_size", batch_size, starting_update)
-    writer.add_scalar("resume/enabled", float(resume is not None), starting_update)
-    writer.add_scalar("resume/starting_update", starting_update, starting_update)
+    writer.add_scalar("模型/参数数量", parameter_count, starting_update)
+    writer.add_scalar("模型/参数内存_MB", parameter_count * 4 / 1024 / 1024, starting_update)
+    writer.add_scalar("系统/环境数", num_envs, starting_update)
+    writer.add_scalar("系统/PPO批次大小", batch_size, starting_update)
+    writer.add_scalar("恢复/是否启用", float(resume is not None), starting_update)
+    writer.add_scalar("恢复/起始更新步数", starting_update, starting_update)
 
     try:
-        with SubprocessVectorEnv(num_envs=num_envs) as envs:
+        with SubprocessVectorEnv(num_envs=num_envs, opponent=opponent) as envs:
             initial = envs.reset([seed + index for index in range(num_envs)])
             observations = np.stack([item[0] for item in initial])
             infos = [item[1] for item in initial]
@@ -207,17 +230,29 @@ def train(
                             rollout_terminal_count += int(terminated)
                             rollout_truncated_count += int(truncated)
                             winner = info["winner"]
-                            writer.add_scalar("episode/length_halfmoves", episode.length, completed_episodes)
-                            writer.add_scalar("episode/captures", episode.captures, completed_episodes)
-                            writer.add_scalar("episode/checks", episode.checks, completed_episodes)
-                            writer.add_scalar("episode/capture_value", episode.capture_value, completed_episodes)
-                            writer.add_scalar("episode/red_moves", episode.red_moves, completed_episodes)
-                            writer.add_scalar("episode/black_moves", episode.black_moves, completed_episodes)
-                            writer.add_scalar("episode/red_win", float(winner == RED), completed_episodes)
-                            writer.add_scalar("episode/black_win", float(winner == BLACK), completed_episodes)
-                            writer.add_scalar("episode/truncated", float(truncated), completed_episodes)
-                            writer.add_scalar("episode/terminal_reason_mate", float(info["reason"] == "将死"), completed_episodes)
-                            writer.add_scalar("episode/terminal_reason_stalemate", float(info["reason"] == "困毙"), completed_episodes)
+                            agent_won = winner is not None and winner == actor
+                            if agent_won:
+                                agent_wins += 1
+                            agent_win_ema = 0.95 * agent_win_ema + (1.0 if agent_won else 0.0) * 0.05
+                            recent_outcomes.append(1.0 if agent_won else 0.0)
+                            if (len(recent_outcomes) == win_rate_window
+                                    and sum(recent_outcomes) >= win_rate_window * target_win_rate
+                                    and (update - starting_update) >= min_updates_before_stop):
+                                stop_training = True
+                            writer.add_scalar("对局/智能体胜率_窗口", sum(recent_outcomes) / len(recent_outcomes), completed_episodes)
+                            writer.add_scalar("对局/长度_半回合", episode.length, completed_episodes)
+                            writer.add_scalar("对局/吃子数", episode.captures, completed_episodes)
+                            writer.add_scalar("对局/将军次数", episode.checks, completed_episodes)
+                            writer.add_scalar("对局/吃子价值", episode.capture_value, completed_episodes)
+                            writer.add_scalar("对局/红方步数", episode.red_moves, completed_episodes)
+                            writer.add_scalar("对局/黑方步数", episode.black_moves, completed_episodes)
+                            writer.add_scalar("对局/红方胜", float(winner == RED), completed_episodes)
+                            writer.add_scalar("对局/黑方胜", float(winner == BLACK), completed_episodes)
+                            writer.add_scalar("对局/智能体胜率", agent_wins / completed_episodes, completed_episodes)
+                            writer.add_scalar("对局/智能体胜率_EMA", agent_win_ema, completed_episodes)
+                            writer.add_scalar("对局/截断", float(truncated), completed_episodes)
+                            writer.add_scalar("对局/终局原因_将死", float(info["reason"] == "将死"), completed_episodes)
+                            writer.add_scalar("对局/终局原因_困毙", float(info["reason"] == "困毙"), completed_episodes)
                             episode.reset()
                             finished_indices.append(index)
 
@@ -241,7 +276,7 @@ def train(
 
                 # Next observations are canonical to the opponent, hence -V(s').
                 for index in reversed(range(rollout_steps)):
-                    delta = rollout_rewards_tensor[index] - gamma * rollout_next_values_tensor[index] - rollout_values_tensor[index]
+                    delta = rollout_rewards_tensor[index] + next_value_sign * gamma * rollout_next_values_tensor[index] - rollout_values_tensor[index]
                     gae = torch.where(
                         rollout_boundaries_tensor[index],
                         delta,
@@ -259,15 +294,15 @@ def train(
                 flat_advantages = normalized_advantages.flatten(0, 1)
 
                 for _ in range(epochs):
-                    logits, values = model(flat_observations, flat_masks)
-                    distribution = torch.distributions.Categorical(logits=logits)
-                    log_probs = distribution.log_prob(flat_actions)
+                    log_probs, action_entropy, values = model.evaluate_actions(
+                        flat_observations, flat_masks, flat_actions
+                    )
                     ratio = (log_probs - flat_log_probs).exp()
                     unclipped = ratio * flat_advantages
                     clipped = ratio.clamp(0.8, 1.2) * flat_advantages
                     policy_loss = -torch.min(unclipped, clipped).mean()
                     value_loss = 0.5 * (flat_returns - values).pow(2).mean()
-                    entropy = distribution.entropy().mean()
+                    entropy = action_entropy.mean()
                     loss = policy_loss + value_loss - 0.01 * entropy
                     optimizer.zero_grad()
                     loss.backward()
@@ -278,26 +313,40 @@ def train(
                 if update % log_interval == 0:
                     approx_kl = float((flat_log_probs - log_probs).mean().detach())
                     clip_fraction = float((torch.abs(ratio - 1.0) > 0.2).float().mean().detach())
-                    writer.add_scalar("train/loss_total", float(loss.detach()), update)
-                    writer.add_scalar("train/loss_policy", float(policy_loss.detach()), update)
-                    writer.add_scalar("train/loss_value", float(value_loss.detach()), update)
-                    writer.add_scalar("train/entropy", float(entropy.detach()), update)
-                    writer.add_scalar("train/approx_kl", approx_kl, update)
-                    writer.add_scalar("train/clip_fraction", clip_fraction, update)
-                    writer.add_scalar("train/gradient_norm", gradient_norm, update)
-                    writer.add_scalar("train/explained_variance", explained_variance(torch, values.detach(), flat_returns), update)
-                    writer.add_scalar("train/learning_rate", optimizer.param_groups[0]["lr"], update)
-                    writer.add_scalar("rollout/mean_reward", float(np.mean(rollout_rewards)), update)
-                    writer.add_scalar("rollout/captures", rollout_captures, update)
-                    writer.add_scalar("rollout/checks", rollout_checks, update)
-                    writer.add_scalar("rollout/mean_legal_actions", float(np.mean(rollout_legal_counts)), update)
-                    writer.add_scalar("rollout/terminal_games", rollout_terminal_count, update)
-                    writer.add_scalar("rollout/truncated_games", rollout_truncated_count, update)
-                    writer.add_scalar("rollout/completed_episodes", completed_episodes, update)
-                    writer.add_scalar("rollout/global_halfmoves", global_step, update)
-                    writer.add_scalar("system/update_seconds", elapsed, update)
-                    writer.add_scalar("system/rollout_halfmoves_per_second", batch_size / elapsed, update)
+                    writer.add_scalar("训练/总损失", float(loss.detach()), update)
+                    writer.add_scalar("训练/策略损失", float(policy_loss.detach()), update)
+                    writer.add_scalar("训练/价值损失", float(value_loss.detach()), update)
+                    writer.add_scalar("训练/熵", float(entropy.detach()), update)
+                    writer.add_scalar("训练/近似KL", approx_kl, update)
+                    writer.add_scalar("训练/裁剪比例", clip_fraction, update)
+                    writer.add_scalar("训练/梯度范数", gradient_norm, update)
+                    writer.add_scalar("训练/解释方差", explained_variance(torch, values.detach(), flat_returns), update)
+                    writer.add_scalar("训练/学习率", optimizer.param_groups[0]["lr"], update)
+                    writer.add_scalar("采样/平均奖励", float(np.mean(rollout_rewards)), update)
+                    writer.add_scalar("采样/吃子数", rollout_captures, update)
+                    writer.add_scalar("采样/将军次数", rollout_checks, update)
+                    writer.add_scalar("采样/平均合法着法数", float(np.mean(rollout_legal_counts)), update)
+                    writer.add_scalar("采样/对局结束数", rollout_terminal_count, update)
+                    writer.add_scalar("采样/截断对局数", rollout_truncated_count, update)
+                    writer.add_scalar("采样/已完成对局", completed_episodes, update)
+                    writer.add_scalar("采样/全局半回合数", global_step, update)
+                    writer.add_scalar("系统/单步更新耗时_秒", elapsed, update)
+                    writer.add_scalar("系统/每秒半回合", batch_size / elapsed, update)
                     writer.flush()
+
+                if stop_training:
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    torch.save({
+                        "model": model.state_dict(), "optimizer": optimizer.state_dict(), "update": update,
+                        "global_step": global_step, "completed_episodes": completed_episodes,
+                        "observation_shape": (16, 10, 9), "action_size": 8100,
+                        "parameter_count": parameter_count, "num_envs": num_envs,
+                        "policy_format": "autoregressive_cross_attention_pointer_v1",
+                        "checkpoint_format": 3,
+                    }, output)
+                    print(f"[early-stop] 稳定胜率达标（近 {win_rate_window} 局 >= {target_win_rate:.0%}），于 update={update} 停止并保存 -> {output}")
+                    writer.add_text("状态", f"early-stop: stable win rate >= {target_win_rate} over {win_rate_window} episodes at update {update}")
+                    break
 
                 print(
                     f"update={update:04d} envs={num_envs:02d} batch={batch_size:04d} episodes={completed_episodes:04d} "
@@ -312,7 +361,8 @@ def train(
                         "global_step": global_step, "completed_episodes": completed_episodes,
                         "observation_shape": (16, 10, 9), "action_size": 8100,
                         "parameter_count": parameter_count, "num_envs": num_envs,
-                        "checkpoint_format": 2,
+                        "policy_format": "autoregressive_cross_attention_pointer_v1",
+                        "checkpoint_format": 3,
                     }, output)
     finally:
         writer.flush()
@@ -328,15 +378,35 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=2.5e-4)
     parser.add_argument("--output", type=Path, default=Path("checkpoints/xiangqi_ppo.pt"))
     parser.add_argument("--resume", type=Path, default=None, help="explicit checkpoint path to continue from; omitted means fresh training")
+    parser.add_argument("--opponent", choices=("selfplay", "search", "model"), default="selfplay",
+                        help="selfplay = RL vs RL; search = RL vs fixed alpha-beta; model = RL vs frozen checkpoint")
+    parser.add_argument("--search-depth", type=int, default=3, help="alpha-beta search depth when --opponent search")
+    parser.add_argument("--search-quiescence", action="store_true", help="enable capture-only quiescence search (slower but stronger)")
+    parser.add_argument("--opponent-model", type=Path, default=Path("checkpoints/xiangqi_ppo_continued.pt"),
+                        help="checkpoint used as the frozen opponent when --opponent model")
+    parser.add_argument("--opponent-stochastic", action="store_true",
+                        help="sample opponent moves instead of greedy (model opponent only)")
+    parser.add_argument("--target-win-rate", type=float, default=1.0,
+                        help="stop training once the windowed agent win rate stays at/above this")
+    parser.add_argument("--win-rate-window", type=int, default=100,
+                        help="number of recent episodes used to judge a stable win rate")
+    parser.add_argument("--min-updates-before-stop", type=int, default=10,
+                        help="never early-stop before this many updates")
     parser.add_argument("--log-dir", type=Path, default=None)
     parser.add_argument("--save-interval", type=int, default=10)
     parser.add_argument("--log-interval", type=int, default=1)
     parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args()
+    opponent = None
+    if args.opponent == "search":
+        opponent = SearchOpponent(depth=args.search_depth, use_quiescence=args.search_quiescence)
+    elif args.opponent == "model":
+        opponent = ModelOpponent(model_path=args.opponent_model, deterministic=not args.opponent_stochastic)
     log_dir = args.log_dir or Path("runs") / f"ppo_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     train(
         args.updates, args.rollout_steps, args.epochs, args.learning_rate, args.output, args.seed,
-        log_dir, args.num_envs, args.save_interval, args.log_interval, args.resume,
+        log_dir, args.num_envs, args.save_interval, args.log_interval, args.resume, opponent,
+        args.target_win_rate, args.win_rate_window, args.min_updates_before_stop,
     )
 
 

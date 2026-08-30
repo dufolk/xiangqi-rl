@@ -7,10 +7,10 @@ from multiprocessing.connection import Connection
 from typing import Optional
 
 
-def _worker(connection: Connection, max_steps: int, start_fen: Optional[str]) -> None:
+def _worker(connection: Connection, max_steps: int, start_fen: Optional[str], opponent=None) -> None:
     from rl.environment import XiangqiEnv
 
-    env = XiangqiEnv(max_steps=max_steps, start_fen=start_fen)
+    env = XiangqiEnv(max_steps=max_steps, start_fen=start_fen, opponent=opponent)
     try:
         while True:
             command, payload = connection.recv()
@@ -36,7 +36,7 @@ class SubprocessVectorEnv:
     generation in parallel.
     """
 
-    def __init__(self, num_envs: int, max_steps: int = 400, start_fen: Optional[str] = None):
+    def __init__(self, num_envs: int, max_steps: int = 400, start_fen: Optional[str] = None, opponent=None):
         if num_envs < 1:
             raise ValueError("num_envs must be at least one")
         self.num_envs = num_envs
@@ -46,7 +46,7 @@ class SubprocessVectorEnv:
         self._processes: list[mp.Process] = []
         for _ in range(num_envs):
             main_connection, worker_connection = context.Pipe()
-            process = context.Process(target=_worker, args=(worker_connection, max_steps, start_fen), daemon=True)
+            process = context.Process(target=_worker, args=(worker_connection, max_steps, start_fen, opponent), daemon=True)
             process.start()
             worker_connection.close()
             self._connections.append(main_connection)

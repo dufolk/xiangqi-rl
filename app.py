@@ -193,7 +193,9 @@ class XiangqiApp:
         self.victory_art: dict[str, Optional[pygame.Surface]] = {}
         self.activate_skin("anime")
         self.game = XiangqiGame()
-        self.ai = PPOAI(depth=2)
+        snapshots = __import__("glob").glob("checkpoints/ppo_snapshot_*.pt")
+        pinned = max(snapshots, key=os.path.getmtime) if snapshots else None
+        self.ai = PPOAI(checkpoint=pinned, depth=2)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="xiangqi-ai")
         self.ai_future: Optional[Future] = None
         self.ai_position = ""

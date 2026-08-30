@@ -47,6 +47,18 @@ rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w
 NUM_ENVS=8 UPDATES=100 ROLLOUT_STEPS=128 EPOCHS=4 ./train_ppo_tb.sh
 ```
 
+通过 `OPPONENT` 切换训练模式：默认 `selfplay` 为同一策略自对弈；设置为 `model` 则对抗一个冻结模型，并必须提供 `OPPONENT_MODEL`：
+
+```bash
+# 自对弈（默认）
+OPPONENT=selfplay ./train_ppo_tb.sh
+
+# 对抗固定模型；学习中的模型从头训练或通过 --resume 指定
+OPPONENT=model OPPONENT_MODEL=checkpoints/frozen_pointer.pt ./train_ppo_tb.sh
+```
+
+策略采用两步自回归动作：交叉注意力先从 90 个起点中选择可走棋子，Pointer 再在 90 个目标格中选择落点；环境接口仍使用兼容的扁平动作编号。旧版 8100 维策略检查点与该架构不兼容，需从新训练或使用新版检查点。
+
 对当前机器建议先使用 `NUM_ENVS=8`；若系统响应正常，可尝试 `NUM_ENVS=12` 或 `NUM_ENVS=16`。
 
 默认每次启动都会**从头训练**。只有显式指定 checkpoint 才恢复训练；`UPDATES` 始终表示“在恢复点之后额外执行多少次更新”：
