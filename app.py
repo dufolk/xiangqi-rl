@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import os
-import sys
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
@@ -14,6 +13,12 @@ os.environ.setdefault("SDL_HINT_VIDEO_HIGHDPI_DISABLED", "0")
 import pygame
 
 from ai_player import PPOAI
+from cinema.board_fx import BoardMove, draw_king_in_check, draw_threat_marks
+from cinema.detect import StoryEvent, analyze_move
+from cinema.director import scene_for_event
+from cinema.fonts import load_font
+from cinema.gallery import build_scene, catalogue
+from cinema.stage import Cutscene
 from game_engine import (
     ADVISOR, BLACK, CANNON, ELEPHANT, HORSE, KING, KINDS, PAWN, RED, ROOK,
     Move, Piece, XiangqiGame,
@@ -59,62 +64,6 @@ RIFT_CHARACTER_NAMES = {
     (RED, CANNON): "崔丝塔娜", (BLACK, CANNON): "金克丝",
     (RED, PAWN): "盖伦", (BLACK, PAWN): "德莱厄斯",
 }
-RIFT_QUOTES = {
-    (RED, KING): ("为了德玛西亚！", "长枪所向，阵线随我推进。", "王者从不把胜利交给偶然。"),
-    (BLACK, KING): ("胜局早已写定。", "我看见的，比你想象得更远。", "真正的力量来自全局。"),
-    (RED, ADVISOR): ("光明会指引我们。", "让这束光照亮破绽。", "别眨眼，精彩才刚开始。"),
-    (BLACK, ADVISOR): ("真假，只在一念之间。", "你看到的，未必是真相。", "这一步，也在计划之中。"),
-    (RED, ELEPHANT): ("巨像，挺身而战！", "只要我在，防线就在。", "该让石翼舒展一下了。"),
-    (BLACK, ELEPHANT): ("死亡也无法阻止我。", "撞碎他们的防线。", "疼痛，只会让我更强。"),
-    (RED, HORSE): ("凛冬正在逼近！", "踏过冰原，也踏过阵线。", "没有人能躲过寒冬。"),
-    (BLACK, HORSE): ("践踏他们的阵线！", "暗影之蹄已经锁定目标。", "逃吧，我喜欢追逐。"),
-    (RED, ROOK): ("锤子可不是摆设！", "这一锤，专治坚固防线。", "英雄也要从小事做起。"),
-    (BLACK, ROOK): ("弱者终将被碾碎。", "恐惧是最精确的武器。", "改造完成，开始清场。"),
-    (RED, CANNON): ("瞄准，然后——轰！", "炮口已经校准！", "这一发会很响亮。"),
-    (BLACK, CANNON): ("规则？炸掉就好啦！", "三、二、一——惊喜！", "别跑，火箭喜欢会动的目标。"),
-    (RED, PAWN): ("正义，永不动摇！", "稳住阵线，步步向前。", "无畏之心，永不退后。"),
-    (BLACK, PAWN): ("诺克萨斯，无可阻挡！", "再向前一步，就是征服。", "只有强者能留下。"),
-}
-ANIME_QUOTES = {
-    KING: ("全员听令，按计划推进。", "棋盘的节奏，由我掌握。", "别担心，我会带大家回去。"),
-    ADVISOR: ("你的破绽，我已经看见了。", "这一步，请交给我吧。", "守护与反击，我都很擅长。"),
-    ELEPHANT: ("先稳住阵线，再寻找机会。", "结界展开，休想越界。", "耐心也是制胜的一部分。"),
-    HORSE: ("从侧翼切进去！", "跟得上我的速度吗？", "下一站，就是你的死角。"),
-    ROOK: ("让开，战车要加速了！", "正面突破才够痛快。", "这条线路，现在归我。"),
-    CANNON: ("弹道确认，准备发射！", "漂亮的爆炸要选好角度。", "听见倒计时了吗？"),
-    PAWN: ("一步也不会退。", "小角色也能改变战局。", "前进，就是我的答案。"),
-}
-EVENT_QUOTES = {
-    "opening": ("序幕已经拉开。", "先声夺人，漂亮的开场。", "布局完成，接下来才是正戏。", "就从这一手开始改写局面。"),
-    "fork": ("两个目标，一个都别想走。", "选择吧——无论哪个都要付出代价。", "一箭双雕，机会抓住了。", "同时锁定，战术成立。"),
-    "check": ("将军。现在轮到你回答。", "王城告急，这一步必须应对。", "退路正在一格格消失。", "这一击，直指中枢。"),
-    "capture": ("关键目标已经清除。", "交换成立，优势到手。", "这枚棋子，我就收下了。", "突破口已经打开。"),
-    "mate": ("胜负已定。", "终局，就写在这一手。", "没有退路了。", "到此为止——漂亮的终章。"),
-}
-
-
-def load_font(size: int, bold: bool = False) -> pygame.font.Font:
-    candidates = {
-        "darwin": ["/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Medium.ttc"],
-        "win32": [os.path.join(os.environ.get("SystemRoot", "C:/Windows"), "Fonts", "msyh.ttc")],
-    }.get(sys.platform, ["/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"])
-    for path in candidates:
-        if os.path.exists(path):
-            font = pygame.font.Font(path, size)
-            font.set_bold(bold)
-            return font
-    return pygame.font.SysFont("Arial Unicode MS", size, bold=bold)
-
-
-def ease_out_cubic(value: float) -> float:
-    return 1.0 - (1.0 - value) ** 3
-
-
-def ease_out_back(value: float) -> float:
-    c1, c3 = 1.70158, 2.70158
-    return 1.0 + c3 * (value - 1.0) ** 3 + c1 * (value - 1.0) ** 2
-
-
 @dataclass
 class UIButton:
     key: str
@@ -124,30 +73,25 @@ class UIButton:
     accent: bool = False
 
 
-@dataclass
-class MoveAnimation:
-    move: Move
-    piece: Piece
-    started_at: int
-    duration: int = 300
-
-    def progress(self, now: int) -> float:
-        return min(1.0, max(0.0, (now - self.started_at) / self.duration))
+STORY_MODES = ("full", "highlights", "off")
+STORY_LABELS = {"full": "全程", "highlights": "精彩", "off": "关闭"}
+MODE_LABELS = {"ai": "人机", "local": "双人", "watch": "观战"}
 
 
 @dataclass
-class TacticalCallout:
-    title: str
-    subtitle: str
-    commentary: str
-    color: tuple[int, int, int]
-    started_at: int
-    actor: Piece
-    victim: Optional[Piece] = None
-    duration: int = 2600
+class Beat:
+    """One step of a move's story: an on-board animation or a full-screen cutscene."""
 
-    def progress(self, now: int) -> float:
-        return min(1.0, max(0.0, (now - self.started_at) / self.duration))
+    board: Optional[BoardMove] = None
+    cut: Optional[Cutscene] = None
+    started_at: Optional[int] = None
+
+    def finished(self, now: int) -> bool:
+        if self.started_at is None:
+            return False
+        if self.board is not None:
+            return self.board.done(now)
+        return now - self.started_at >= self.cut.duration
 
 
 class XiangqiApp:
@@ -212,10 +156,16 @@ class XiangqiApp:
         self.message = "红方先行 · 请落子"
         self.modal = ""
         self.text_input = ""
-        self.move_animation: Optional[MoveAnimation] = None
         self.pending_board_click: Optional[tuple[tuple[int, int], int]] = None
-        self.callout: Optional[TacticalCallout] = None
-        self.last_callout_halfmove = -10
+        self.beats: list[Beat] = []
+        self.story_mode = "full"
+        self.threats: list[tuple[int, int]] = []
+        self.threats_until = 0
+        self.ai_ready_at = 0
+        self.ai_error_shown = ""
+        self.gallery_index: Optional[int] = None
+        self.gallery_scene: Optional[Cutscene] = None
+        self.gallery_started = 0
         self.commentary = "棋娘们已经就位，等待主人的第一道指令。"
         self.shake_until = 0
         self.flash_until = 0
@@ -302,26 +252,6 @@ class XiangqiApp:
         if self.skin == "rift":
             return RIFT_CHARACTER_NAMES[(piece.side, piece.kind)]
         return CHARACTER_NAMES[piece.kind]
-
-    @staticmethod
-    def tactic_key(title: str) -> str:
-        if "绝杀" in title or title.replace(" ", "") == "绝杀":
-            return "mate"
-        if "将军" in title or "卧槽马" in title:
-            return "check"
-        if "捉" in title:
-            return "fork"
-        if title in ("当 头 炮", "过 宫 炮", "仙 人 指 路", "起 马 局", "屏 风 马", "飞 相 局", "卒 底 炮"):
-            return "opening"
-        return "capture"
-
-    def character_quote(self, piece: Piece, title: str) -> str:
-        event_key = self.tactic_key(title)
-        event_quotes = EVENT_QUOTES[event_key]
-        character_quotes = RIFT_QUOTES[(piece.side, piece.kind)] if self.skin == "rift" else ANIME_QUOTES[piece.kind]
-        pool = character_quotes + event_quotes
-        seed = self.game.halfmove * 13 + piece.kind.__hash__() + piece.side.__hash__() + sum(ord(char) for char in title)
-        return pool[seed % len(pool)]
 
     def character_portrait(self, piece: Piece, size: int) -> Optional[pygame.Surface]:
         key = (piece.side, piece.kind, size)
@@ -562,17 +492,27 @@ class XiangqiApp:
                 pygame.draw.circle(self.canvas, (2, 42, 52), (x + 2, y + 3), int(8 + pulse * 2))
                 pygame.draw.circle(self.canvas, CYAN, (x, y), int(7 + pulse * 2))
 
-        animation_end = self.move_animation.move.end if self.move_animation else None
+        story = self.story_board_beat()
+        hidden = story.board.move.end if story else None
         for row in range(10):
             for col in range(9):
                 piece = self.game.board[row][col]
-                if piece and (row, col) != animation_end:
+                if piece and (row, col) != hidden:
                     center = self.display_square(row, col)
                     if self.selected == (row, col):
                         center = (center[0], center[1] - int(3 + pulse * 2))
                     self.draw_piece(piece, center, 31)
-        self._draw_move_animation(now)
-        self._draw_check_effect(now)
+        if story and story.started_at is None:
+            pending = story.board
+            self.draw_piece(pending.piece, self.display_square(*pending.move.start), 31)
+            if pending.move.captured:
+                self.draw_piece(pending.move.captured, self.display_square(*pending.move.end), 31)
+        elif story:
+            story.board.draw(self.canvas, now, self.display_square, lambda piece, pos, alpha: self.draw_piece(piece, pos, 31, alpha))
+        if not self.beats:
+            if now < self.threats_until:
+                draw_threat_marks(self.canvas, self.threats, self.display_square, now, (self.threats_until - now) / 2400)
+            self._draw_check_effect(now)
 
     def piece_surface(self, piece: Piece, radius: int) -> pygame.Surface:
         key = (piece.side, piece.kind, radius)
@@ -633,45 +573,6 @@ class XiangqiApp:
             surface.set_alpha(alpha)
         self.canvas.blit(surface, surface.get_rect(center=center))
 
-    def _draw_move_animation(self, now: int) -> None:
-        animation = self.move_animation
-        if not animation:
-            return
-        raw = animation.progress(now)
-        start = self.display_square(*animation.move.start)
-        end = self.display_square(*animation.move.end)
-        progress = ease_out_cubic(raw)
-        x = start[0] + (end[0] - start[0]) * progress
-        y = start[1] + (end[1] - start[1]) * progress - math.sin(raw * math.pi) * 17
-        trail = pygame.Surface((VW, VH), pygame.SRCALPHA)
-        energy = RED_LIGHT if animation.piece.side == RED else CYAN
-        for index in range(1, 7):
-            t = max(0.0, progress - index * 0.038)
-            tx = start[0] + (end[0] - start[0]) * t
-            ty = start[1] + (end[1] - start[1]) * t - math.sin(t * math.pi) * 15
-            pygame.draw.circle(trail, (*energy, max(0, 58 - index * 8)), (int(tx), int(ty)), 26 - index * 2)
-        self.canvas.blit(trail, (0, 0))
-        if animation.move.captured and raw < 0.72:
-            capture_alpha = int(255 * (1 - raw / 0.72))
-            capture_scale = max(20, int(31 * (1 - raw * 0.22)))
-            self.draw_piece(animation.move.captured, end, capture_scale, capture_alpha)
-        if animation.move.captured and raw > 0.45:
-            burst = min(1.0, (raw - 0.45) / 0.45)
-            ring_radius = int(18 + burst * 48)
-            fx = pygame.Surface((130, 130), pygame.SRCALPHA)
-            pygame.draw.circle(fx, (*energy, int(210 * (1 - burst))), (65, 65), ring_radius, 3)
-            for index in range(12):
-                angle = index * math.tau / 12 + 0.25
-                distance = 18 + burst * (28 + index % 3 * 8)
-                px = 65 + math.cos(angle) * distance
-                py = 65 + math.sin(angle) * distance
-                pygame.draw.circle(fx, (*CYAN_LIGHT, int(230 * (1 - burst))), (int(px), int(py)), 3)
-            self.canvas.blit(fx, (end[0] - 65, end[1] - 65))
-        scale = 31 + int(math.sin(raw * math.pi) * 4)
-        self.draw_piece(animation.piece, (int(x), int(y)), scale)
-        if raw >= 1.0:
-            self.move_animation = None
-
     def _draw_check_effect(self, now: int) -> None:
         if self.game.winner or not self.game.is_in_check(self.game.turn):
             return
@@ -684,178 +585,7 @@ class XiangqiApp:
         pygame.draw.circle(fx, (*RED_LIGHT, int(70 + pulse * 55)), (55, 55), int(37 + pulse * 8), 5)
         pygame.draw.circle(fx, (*CYAN_LIGHT, int(130 - pulse * 50)), (55, 55), int(44 + pulse * 5), 2)
         self.canvas.blit(fx, (x - 55, y - 55))
-
-    def classify_opening(self, move: Move, piece: Piece) -> Optional[tuple[str, str, str, tuple[int, int, int]]]:
-        """Recognize only a side's opening move; later development stays quiet."""
-        # push() 已完成后：第 1 半回合是红方首着，第 2 半回合是黑方首着。
-        # 不对后续发展手反复贴开局标签，避免“过宫炮”等播报延迟触发。
-        if self.game.halfmove not in (1, 2) or move.captured is not None:
-            return None
-        side_name = "红方" if piece.side == RED else "黑方"
-        home_row = 9 if piece.side == RED else 0
-        cannon_row = 7 if piece.side == RED else 2
-        pawn_row = 6 if piece.side == RED else 3
-        forward = -1 if piece.side == RED else 1
-        developed_horse_row = 7 if piece.side == RED else 2
-
-        if piece.kind == PAWN and move.start[0] == pawn_row and move.start[1] in (2, 6) and move.end == (pawn_row + forward, move.start[1]):
-            return "仙 人 指 路", "挺三、七兵 · 试探全局", f"{side_name}轻挺边兵，为马开路并试探对方阵型，局面保留了充分弹性。", CYAN
-        if piece.kind == CANNON and move.start[0] == cannon_row and move.start[1] in (1, 7) and move.end == (cannon_row, 4):
-            return "当 头 炮", "炮镇中路 · 主动出击", f"{side_name}把炮架到中路，直接施压中卒与将门，是最具进攻性的经典开局。", CYAN
-        if piece.kind == CANNON and move.start[0] == cannon_row and move.start[1] == 1 and move.end == (cannon_row, 5):
-            return "过 宫 炮", "横越九宫 · 转向侧翼", f"{side_name}让边炮横越中宫，迅速把火力投向另一翼，攻守转换更具隐蔽性。", CYAN
-        if piece.kind == CANNON and move.start[0] == cannon_row and move.start[1] == 7 and move.end == (cannon_row, 3):
-            return "过 宫 炮", "横越九宫 · 转向侧翼", f"{side_name}让边炮横越中宫，迅速把火力投向另一翼，攻守转换更具隐蔽性。", CYAN
-        if piece.kind == HORSE and move.start[0] == home_row and move.start[1] in (1, 7) and move.end[0] == developed_horse_row and move.end[1] in (2, 6):
-            horses_ready = all(self.game.board[developed_horse_row][col] == Piece(piece.side, HORSE) for col in (2, 6))
-            if horses_ready:
-                return "屏 风 马", "双马成屏 · 稳守待发", f"{side_name}双马拱卫中兵，屏风马阵型完成，后续可稳守亦可从两翼反击。", CYAN
-            return "起 马 局", "正马出阵 · 先固后攻", f"{side_name}先起正马，优先完成子力协调，为中路和侧翼的发展留出空间。", CYAN
-        if piece.kind == ELEPHANT and move.start[0] == home_row and move.start[1] in (2, 6) and move.end == (developed_horse_row, 4):
-            return "飞 相 局", "先固阵型 · 后发制人", f"{side_name}飞相巩固中路防线，属于重视阵型完整与反击弹性的经典布局。", CYAN
-        if piece.kind == CANNON and piece.side == BLACK and move.start == (2, 1) and move.end == (2, 2):
-            return "卒 底 炮", "借卒成架 · 针锋相对", "黑方以卒底炮回应，快速制造炮架并对红方边兵体系施加反击压力。", CYAN
-        if piece.kind == CANNON and piece.side == BLACK and move.start == (2, 7) and move.end == (2, 6):
-            return "卒 底 炮", "借卒成架 · 针锋相对", "黑方以卒底炮回应，快速制造炮架并对红方边兵体系施加反击压力。", CYAN
-        return None
-
-    def classify_tactic(self, move: Move, piece: Piece) -> tuple[str, str, str, tuple[int, int, int]]:
-        side_name = "红方" if piece.side == RED else "黑方"
-        capture_name = move.captured.name if move.captured else ""
-        if self.game.winner:
-            own_rooks = sum(item is not None and item.side == piece.side and item.kind == ROOK for row in self.game.board for item in row)
-            own_cannons = sum(item is not None and item.side == piece.side and item.kind == CANNON for row in self.game.board for item in row)
-            if piece.kind == HORSE and move.end[0] in (2, 7) and move.end[1] in (3, 5):
-                title, subtitle = "卧槽马绝杀", "战马踏入宫前死角 · 封死将门"
-            elif piece.kind == CANNON and own_cannons >= 2:
-                title, subtitle = "重炮绝杀", "双炮叠阵 · 中轴火力完全贯穿"
-            elif piece.kind == ROOK and own_rooks >= 2:
-                title, subtitle = "双车绝杀", "双车错位封锁 · 无路可退"
-            else:
-                title, subtitle = "绝  杀", "退路尽封 · 命运终局"
-            return title, subtitle, f"{side_name}完成致命一击，敌方将帅已无任何合法应对。", RED_LIGHT
-
-        attacked = []
-        for attack in self.game.pseudo_moves_from(*move.end):
-            target = attack.captured
-            if target and target.side != piece.side and target.kind in (KING, ROOK, CANNON, HORSE):
-                attacked.append(target)
-        if len(attacked) >= 2:
-            targets = "、".join(target.name for target in attacked[:2])
-            return "捉  双", f"单子双袭 · 同时锁定 {targets}", f"{piece.name}落位后同时攻击两个高价值目标，对手只能保存其一。", GOLD
-
-        if self.game.is_in_check(self.game.turn):
-            if piece.kind == HORSE and move.end[0] in (2, 7) and move.end[1] in (3, 5):
-                return "卧 槽 马", "战马压宫 · 将门告急", "马跃卧槽点形成近身将军，并压缩了将帅在九宫内的活动空间。", RED_LIGHT
-            if piece.kind == CANNON:
-                return "中炮将军", "炮火贯穿中轴", "炮借架发力直击将帅，对方必须立刻处理这条攻击线路。", RED_LIGHT
-            return "将  军", "KING UNDER ATTACK", f"{piece.name}形成直接将军，局面节奏被{side_name}强制接管。", RED_LIGHT
-
-        opening = self.classify_opening(move, piece)
-        if opening:
-            return opening
-        if move.captured and move.captured.kind in (ROOK, CANNON, HORSE):
-            return "关键击破", f"{piece.name} × {capture_name}", f"{side_name}{piece.name}拿下高价值的{capture_name}，局面天平明显倾斜。", GOLD
-        if move.captured:
-            return "", "", f"{side_name}完成一次常规交换，棋局继续推进。", CYAN
-        return "", "", f"{side_name}{piece.name}完成调动，正在重构棋盘上的攻防线路。", CYAN
-
-    def trigger_tactical_callout(self, move: Move, piece: Piece) -> None:
-        title, subtitle, commentary, color = self.classify_tactic(move, piece)
-        if self.skin == "rift":
-            hero = self.character_name(piece)
-            if move.captured and title == "关键击破":
-                victim = self.character_name(move.captured)
-                subtitle = f"{hero} 击破 {victim}"
-                commentary = f"{hero}拿下关键目标，{victim}退出战场。"
-            elif title:
-                commentary = f"{hero}触发『{title.replace(' ', '')}』：{commentary}"
-        self.commentary = commentary
-        if not title:
-            self.callout = None
-            return
-        event_key = self.tactic_key(title)
-        urgent = event_key in ("mate", "check", "fork")
-        if not urgent and self.game.halfmove - getattr(self, "last_callout_halfmove", -10) < 3:
-            self.callout = None
-            return
-        self.last_callout_halfmove = self.game.halfmove
-        duration = 3600 if event_key == "mate" else 2800
-        self.callout = TacticalCallout(
-            title, subtitle, commentary, color, pygame.time.get_ticks(),
-            actor=piece, victim=move.captured, duration=duration,
-        )
-        if event_key == "mate":
-            self.flash_until = pygame.time.get_ticks() + 520
-            self.shake_until = pygame.time.get_ticks() + 650
-
-    def draw_tactical_callout(self) -> None:
-        event = self.callout
-        if not event:
-            return
-        now = pygame.time.get_ticks()
-        progress = event.progress(now)
-        if progress >= 1.0:
-            self.callout = None
-            return
-        enter = min(1.0, progress / 0.16)
-        exit_progress = max(0.0, (progress - 0.80) / 0.20)
-        width, height = 690, 225
-        panel = pygame.Surface((width, height), pygame.SRCALPHA)
-        # 关键播报卡片必须完全实底，避免棋盘网格在任何退出帧透入内容区。
-        panel_fill = (5, 25, 31, 255) if self.skin == "rift" else (31, 17, 61, 255)
-        inner_line = (224, 190, 105, 100) if self.skin == "rift" else (255, 220, 247, 85)
-        pygame.draw.rect(panel, panel_fill, panel.get_rect(), border_radius=28)
-        pygame.draw.rect(panel, (*event.color, 225), panel.get_rect(), 3, border_radius=28)
-        pygame.draw.rect(panel, inner_line, panel.get_rect().inflate(-12, -12), 1, border_radius=22)
-        for index in range(18):
-            x = (index * 47 + now // 25) % width
-            y = 24 + (index * 31) % (height - 48)
-            if self.skin == "rift":
-                pygame.draw.polygon(panel, (104, 202, 238, 45), [(x, y - 5), (x + 4, y), (x, y + 5), (x - 4, y)])
-            else:
-                pygame.draw.ellipse(panel, (255, 184, 224, 40), (x, y, 10, 5))
-
-        actor = self.character_portrait(event.actor, 176)
-        if actor is not None:
-            panel.blit(actor, (16, 24))
-            pygame.draw.circle(panel, event.color, (104, 112), 87, 3)
-        text_center = 430 if event.victim else 448
-        event_label = "英雄时刻" if self.skin == "rift" else "必杀演出"
-        label = self.fonts["tiny"].render(f"{self.character_name(event.actor)} · {event_label}", True, event.color)
-        panel.blit(label, label.get_rect(center=(text_center, 31)))
-        title = self.fonts["callout"].render(event.title, True, (255, 249, 255))
-        shadow = self.fonts["callout"].render(event.title, True, (95, 32, 116))
-        panel.blit(shadow, shadow.get_rect(center=(text_center + 4, 99 + 5)))
-        panel.blit(title, title.get_rect(center=(text_center, 99)))
-        subtitle = self.fonts["callout_small"].render(event.subtitle, True, GOLD_LIGHT)
-        panel.blit(subtitle, subtitle.get_rect(center=(text_center, 154)))
-        actor_line = self.fonts["small"].render(
-            f"{self.character_name(event.actor)}：『{self.character_quote(event.actor, event.title)}』", True,
-            (223, 197, 133) if self.skin == "rift" else (255, 207, 235),
-        )
-        panel.blit(actor_line, actor_line.get_rect(center=(text_center, 188)))
-
-        if event.victim:
-            victim = self.character_portrait(event.victim, 105)
-            if victim is not None:
-                victim.set_alpha(int(210 * max(0.2, 1 - progress)))
-                panel.blit(victim, (565, 87))
-                pygame.draw.circle(panel, (161, 138, 181), (617, 139), 51, 2)
-            cross = int(180 * min(1.0, progress * 3))
-            pygame.draw.line(panel, (255, 102, 153, cross), (580, 103), (656, 178), 5)
-            pygame.draw.line(panel, (255, 102, 153, cross), (656, 103), (580, 178), 5)
-
-        # 退出时保持卡片不透明并缩小上移；不使用整体透明度，防止棋盘线透到播报内容上。
-        exit_scale = 1.0 - 0.18 * ease_out_cubic(exit_progress)
-        scale = (0.82 + ease_out_back(enter) * 0.18) * exit_scale
-        panel = pygame.transform.smoothscale(panel, (int(width * scale), int(height * scale)))
-        exit_y = int(18 * ease_out_cubic(exit_progress))
-        self.canvas.blit(panel, panel.get_rect(center=(394, 421 - exit_y)))
-        if now < self.flash_until:
-            flash = pygame.Surface((VW, VH), pygame.SRCALPHA)
-            flash.fill((*event.color, int(70 * (self.flash_until - now) / 520)))
-            self.canvas.blit(flash, (0, 0))
+        draw_king_in_check(self.canvas, (x, y), now)
 
     def draw_victory_splash(self) -> None:
         if not self.game.winner:
@@ -930,9 +660,9 @@ class XiangqiApp:
         if self.mode == "editor":
             badge = "布阵中"
         elif self.skin == "rift":
-            badge = "峡谷挑战" if self.opponent_mode == "ai" else "英雄对弈"
+            badge = {"ai": "峡谷挑战", "local": "英雄对弈", "watch": "峡谷观战"}[self.opponent_mode]
         else:
-            badge = "棋娘挑战" if self.opponent_mode == "ai" else "好友对弈"
+            badge = {"ai": "棋娘挑战", "local": "好友对弈", "watch": "观棋剧场"}[self.opponent_mode]
         badge_rect = pygame.Rect(1245, 170, 115, 34)
         badge_fill = (20, 74, 82) if self.skin == "rift" else (91, 58, 126)
         badge_border = GOLD if self.skin == "rift" else (231, 181, 250)
@@ -946,7 +676,7 @@ class XiangqiApp:
         self.add_button("flip", 1093, y, 132, "翻转棋盘", active=self.flipped)
         self.add_button("editor", 1237, y, 148, "局面编辑", active=self.mode == "editor")
         y += 56
-        self.add_button("mode", 805, y, 142, "模式 · " + ("人机" if self.opponent_mode == "ai" else "双人"), active=self.opponent_mode == "ai")
+        self.add_button("mode", 805, y, 142, "模式 · " + MODE_LABELS[self.opponent_mode], active=self.opponent_mode != "local")
         self.add_button("side", 959, y, 128, "执子 · " + ("红" if self.human_side == RED else "黑"))
         self.add_button("depth", 1099, y, 132, f"棋力 · {'萌新' if self.ai.depth == 1 else '进阶' if self.ai.depth == 2 else '高手'}")
         skin_label = "皮肤 · 峡谷" if self.skin == "rift" else "皮肤 · 棋娘"
@@ -955,7 +685,10 @@ class XiangqiApp:
         if self.mode == "editor":
             self.draw_editor_panel(805, 382)
         else:
-            self.draw_play_panel(805, 382)
+            y += 56
+            self.add_button("story", 805, y, 284, f"剧情演出 · {STORY_LABELS[self.story_mode]}", active=self.story_mode != "off")
+            self.add_button("gallery", 1101, y, 284, "演出图鉴 · G")
+            self.draw_play_panel(805, 428)
         self.draw_status_bar()
 
     def draw_play_panel(self, x: int, y: int) -> None:
@@ -973,7 +706,7 @@ class XiangqiApp:
                 label = RIFT_CHARACTER_NAMES[(side, KING)]
             else:
                 label = "绯樱主将" if side == RED else "苍月主将"
-            if side != self.human_side and self.opponent_mode == "ai":
+            if self.opponent_mode == "watch" or (side != self.human_side and self.opponent_mode == "ai"):
                 label += " · AI"
             self.draw_text(label, self.fonts["button"], TEXT, (px + 72, y + 18))
             self.draw_text("正在出阵" if active else "等待回合", self.fonts["tiny"], team_color if active else MUTED, (px + 72, y + 45))
@@ -987,7 +720,7 @@ class XiangqiApp:
         for index, line in enumerate(commentary_lines[:2]):
             self.draw_text(line, self.fonts["small"], TEXT, (x + 18, y + 132 + index * 25))
 
-        log_rect = pygame.Rect(x, y + 200, 580, 150)
+        log_rect = pygame.Rect(x, y + 200, 580, 130)
         self.draw_glass(log_rect, (9, 31, 38) if self.skin == "rift" else (35, 24, 61), 252, 16)
         self.draw_text("对局棋谱", self.fonts["button"], TEXT, (x + 18, y + 214))
         self.draw_text(f"第 {self.game.halfmove // 2 + 1:02d} 回合", self.fonts["tiny"], RED_LIGHT, (x + 468, y + 217))
@@ -995,9 +728,11 @@ class XiangqiApp:
         if not self.move_log:
             self.draw_text("等待行动数据…", self.fonts["small"], MUTED, (x + 20, y + 270))
         else:
-            recent = self.move_log[-8:]
+            first = max(0, len(self.move_log) - 6)
+            first -= first % 2
+            recent = self.move_log[first:]
             for index in range(0, len(recent), 2):
-                number = max(1, (len(self.move_log) - len(recent) + index) // 2 + 1)
+                number = (first + index) // 2 + 1
                 row_y = y + 253 + index // 2 * 24
                 row_rect = pygame.Rect(x + 14, row_y - 2, 550, 22)
                 pygame.draw.rect(self.canvas, (66, 43, 91) if index // 2 % 2 == 0 else (48, 32, 73), row_rect, border_radius=6)
@@ -1040,7 +775,7 @@ class XiangqiApp:
         if "思考" in message:
             message = "AI 正在思考" + "." * (1 + pygame.time.get_ticks() // 350 % 3)
         self.draw_text(message[:38], self.fonts["body"], TEXT, (851, 790))
-        self.draw_text("F 翻转   U 悔棋   R 新局   S 换肤", self.fonts["tiny"], MUTED, (851, 824))
+        self.draw_text("F 翻转   U 悔棋   R 新局   S 换肤   空格 跳过演出   G 图鉴", self.fonts["tiny"], MUTED, (851, 824))
 
     def draw_modal(self) -> None:
         shade = pygame.Surface((VW, VH), pygame.SRCALPHA)
@@ -1071,9 +806,14 @@ class XiangqiApp:
         else:
             self.draw_board()
         self.draw_sidebar()
-        self.draw_tactical_callout()
-        if self.game.winner and self.callout is None:
+        now = pygame.time.get_ticks()
+        current = self.beats[0] if self.beats else None
+        if current is not None and current.cut is not None and current.started_at is not None:
+            current.cut.draw(self.canvas, now - current.started_at)
+        if self.game.winner and not self.beats:
             self.draw_victory_splash()
+        if self.gallery_scene is not None:
+            self.draw_gallery(now)
         if self.modal:
             self.draw_modal()
         width, height = self.window.get_size()
@@ -1090,10 +830,7 @@ class XiangqiApp:
         self.selected = None
         self.legal_moves = []
         self.move_log.clear()
-        self.move_animation = None
-        self.pending_board_click = None
-        self.callout = None
-        self.last_callout_halfmove = -10
+        self.clear_story()
         if self.skin == "rift":
             self.commentary = "欢迎来到峡谷棋阵。嘉文四世率领蓝方英雄先手出击。"
         else:
@@ -1109,15 +846,14 @@ class XiangqiApp:
         piece = self.game.piece_at(move.start)
         if piece is None:
             return
-        self.game.push(move)
-        text = self.game.move_text(move) or piece.name
+        played = self.game.push(move)
+        text = self.game.move_text(played) or piece.name
         self.move_log.append(text)
-        self.trigger_tactical_callout(move, piece)
-        self.move_animation = MoveAnimation(move, piece, pygame.time.get_ticks())
         self.selected = None
         self.legal_moves = []
-        if move.captured:
-            self.shake_until = pygame.time.get_ticks() + 240
+        events = analyze_move(self.game, played, piece)
+        self.queue_story(played, piece, events)
+        self.update_commentary(piece, played, events)
         if self.game.winner:
             winner = "红方" if self.game.winner == RED else "黑方"
             self.message = f"{winner}获胜 · {self.game.reason}"
@@ -1126,8 +862,114 @@ class XiangqiApp:
         else:
             self.message = ("红方" if self.game.turn == RED else "黑方") + "行棋"
 
+    # --- story / cutscenes ---------------------------------------------------
+    def wants_cutscene(self, event: StoryEvent) -> bool:
+        if self.story_mode == "off":
+            return False
+        if event.kind in ("mate", "stalemate", "opening", "sacrifice"):
+            return True
+        if event.kind == "capture":
+            if self.story_mode == "full":
+                return True
+            big = event.victim is not None and event.victim.kind in (ROOK, HORSE, CANNON)
+            upset = event.actor.kind == PAWN and event.victim is not None and event.victim.kind != PAWN
+            return big or upset
+        if event.kind == "check":
+            return self.story_mode == "full" and event.key != "generic"
+        return False
+
+    def queue_story(self, move: Move, piece: Piece, events: list[StoryEvent]) -> None:
+        in_check = self.game.winner is None and self.game.is_in_check(self.game.turn)
+        crossed = piece.kind == PAWN and (
+            (piece.side == RED and move.start[0] >= 5 and move.end[0] <= 4)
+            or (piece.side == BLACK and move.start[0] <= 4 and move.end[0] >= 5)
+        )
+        board = Beat(board=BoardMove(move, piece, 0, check=in_check, crossed_river=crossed))
+        cuts = [scene for scene in (scene_for_event(e) for e in events if self.wants_cutscene(e)) if scene is not None]
+        before = [Beat(cut=scene) for scene in cuts if scene.event.kind == "capture"]
+        after = [Beat(cut=scene) for scene in cuts if scene.event.kind != "capture"]
+        self.beats.extend(before + [board] + after)
+        self.threats = [
+            attack.end for attack in self.game.pseudo_moves_from(*move.end)
+            if attack.captured and attack.captured.side != piece.side and attack.captured.kind in (ROOK, HORSE, CANNON)
+        ]
+        self.threats_until = 0
+
+    def update_commentary(self, piece: Piece, move: Move, events: list[StoryEvent]) -> None:
+        side_name = "红方" if piece.side == RED else "黑方"
+        hero = self.character_name(piece)
+        if not events:
+            self.commentary = f"{side_name}{piece.name}（{hero}）完成调动，正在重构棋盘上的攻防线路。"
+            return
+        event = events[-1]
+        if event.kind == "capture":
+            self.commentary = f"『{event.title}』{hero}：{event.attacker_line}"
+        elif event.kind == "opening":
+            self.commentary = f"{side_name}布下『{event.title}』—— {event.subtitle.split(' · ', 1)[-1]}"
+        elif event.kind in ("mate", "stalemate"):
+            self.commentary = f"『{event.title.replace(' ', '')}』！{event.subtitle}。{side_name}{hero}一锤定音。"
+        else:
+            self.commentary = f"『{event.title.replace(' ', '')}』{event.subtitle}，{hero}步步紧逼。"
+
+    def story_board_beat(self) -> Optional[Beat]:
+        return next((beat for beat in self.beats if beat.board is not None), None)
+
+    def update_story(self) -> None:
+        now = pygame.time.get_ticks()
+        while self.beats:
+            beat = self.beats[0]
+            if beat.started_at is None:
+                beat.started_at = now
+                if beat.board is not None:
+                    beat.board.started_at = now
+            if not beat.finished(now):
+                break
+            self.beats.pop(0)
+            if beat.board is not None:
+                self.threats_until = now + 2400
+
+    def skip_cutscene(self) -> bool:
+        if self.beats and self.beats[0].cut is not None and self.beats[0].started_at is not None:
+            self.beats.pop(0)
+            return True
+        return False
+
+    def clear_story(self) -> None:
+        self.beats.clear()
+        self.pending_board_click = None
+        self.threats_until = 0
+
+    def open_gallery(self, index: int) -> None:
+        items = catalogue()
+        self.gallery_index = index % len(items)
+        category, key = items[self.gallery_index]
+        side = RED if (self.gallery_index // 2) % 2 == 0 else BLACK
+        self.gallery_scene = build_scene(category, key, side)
+        self.gallery_started = pygame.time.get_ticks()
+
+    def close_gallery(self) -> None:
+        self.gallery_index = None
+        self.gallery_scene = None
+
+    def draw_gallery(self, now: int) -> None:
+        scene = self.gallery_scene
+        elapsed = now - self.gallery_started
+        if elapsed >= scene.duration:
+            self.open_gallery((self.gallery_index or 0) + 1)
+            scene, elapsed = self.gallery_scene, 0
+        self.canvas.fill((8, 6, 14))
+        scene.draw(self.canvas, elapsed)
+        total = len(catalogue())
+        hud = f"演出图鉴  {self.gallery_index + 1:02d} / {total}    ← → 切换    空格 重播    G / Esc 退出"
+        label = self.fonts["small"].render(hud, True, (255, 236, 200))
+        plate = pygame.Rect(0, 0, label.get_width() + 40, 36)
+        plate.midtop = (VW // 2, 92)
+        pygame.draw.rect(self.canvas, (20, 14, 34), plate, border_radius=18)
+        pygame.draw.rect(self.canvas, GOLD, plate, 1, border_radius=18)
+        self.canvas.blit(label, label.get_rect(center=plate.center))
+
     def handle_board_click(self, square: tuple[int, int], button: int) -> None:
-        if self.move_animation:
+        if self.beats:
             self.pending_board_click = (square, button)
             self.message = "已记录本次点击，落子动画结束后立即执行。"
             return
@@ -1139,7 +981,7 @@ class XiangqiApp:
             return
         if button != 1 or self.game.winner:
             return
-        if self.opponent_mode == "ai" and self.game.turn != self.human_side:
+        if self.ai_controls_turn():
             return
         if self.selected:
             chosen = next((move for move in self.legal_moves if move.end == square), None)
@@ -1160,8 +1002,7 @@ class XiangqiApp:
             self.new_game()
         elif key == "undo":
             self.cancel_ai()
-            self.move_animation = None
-            self.pending_board_click = None
+            self.clear_story()
             undone = self.game.undo()
             if self.opponent_mode == "ai" and undone and self.game.turn != self.human_side:
                 self.game.undo()
@@ -1175,14 +1016,21 @@ class XiangqiApp:
             self.flipped = not self.flipped
         elif key == "editor":
             self.cancel_ai()
-            self.move_animation = None
-            self.pending_board_click = None
+            self.clear_story()
             self.mode = "play" if self.mode == "editor" else "editor"
             self.selected, self.legal_moves = None, []
             self.message = "局面编辑已开启" if self.mode == "editor" else "返回对局"
         elif key == "mode":
-            self.opponent_mode = "local" if self.opponent_mode == "ai" else "ai"
-            self.message = "已切换为双人对弈" if self.opponent_mode == "local" else "已切换为人机对弈"
+            order = ("ai", "local", "watch")
+            self.opponent_mode = order[(order.index(self.opponent_mode) + 1) % len(order)]
+            self.cancel_ai()
+            self.message = {"ai": "已切换为人机对弈", "local": "已切换为双人对弈", "watch": "观战模式：AI 对 AI，尽情欣赏剧情"}[self.opponent_mode]
+        elif key == "story":
+            self.story_mode = STORY_MODES[(STORY_MODES.index(self.story_mode) + 1) % len(STORY_MODES)]
+            self.message = {"full": "剧情演出：每次吃子、开局、将军都有过场", "highlights": "剧情演出：只播放精彩时刻",
+                            "off": "剧情演出已关闭，仅保留棋盘动画"}[self.story_mode]
+        elif key == "gallery":
+            self.open_gallery(0)
         elif key == "side":
             self.human_side = BLACK if self.human_side == RED else RED
             self.new_game()
@@ -1192,7 +1040,6 @@ class XiangqiApp:
         elif key == "skin":
             next_skin = "rift" if self.skin == "anime" else "anime"
             self.activate_skin(next_skin)
-            self.callout = None
             if next_skin == "rift":
                 self.commentary = "英雄已降临棋盘。召唤师峡谷阵容接管本局视觉。"
                 self.message = "已切换：峡谷英雄皮肤"
@@ -1261,6 +1108,19 @@ class XiangqiApp:
         elif event.type == pygame.TEXTINPUT:
             self.text_input += event.text
 
+    def handle_gallery_event(self, event: pygame.event.Event) -> None:
+        if event.type == pygame.KEYDOWN:
+            if event.key in (pygame.K_ESCAPE, pygame.K_g):
+                self.close_gallery()
+            elif event.key in (pygame.K_RIGHT, pygame.K_DOWN):
+                self.open_gallery((self.gallery_index or 0) + 1)
+            elif event.key in (pygame.K_LEFT, pygame.K_UP):
+                self.open_gallery((self.gallery_index or 0) - 1)
+            elif event.key == pygame.K_SPACE:
+                self.open_gallery(self.gallery_index or 0)
+        elif event.type == pygame.MOUSEBUTTONDOWN:
+            self.open_gallery((self.gallery_index or 0) + (1 if event.button != 3 else -1))
+
     def handle_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame.QUIT:
             self.running = False
@@ -1268,9 +1128,16 @@ class XiangqiApp:
         if self.modal:
             self.handle_modal_event(event)
             return
+        if self.gallery_scene is not None:
+            self.handle_gallery_event(event)
+            return
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 self.running = False
+            elif event.key == pygame.K_SPACE:
+                self.skip_cutscene()
+            elif event.key == pygame.K_g:
+                self.open_gallery(0)
             elif event.key == pygame.K_f:
                 self.flipped = not self.flipped
             elif event.key == pygame.K_r:
@@ -1280,6 +1147,8 @@ class XiangqiApp:
             elif event.key == pygame.K_s:
                 self.handle_button("skin")
         if event.type == pygame.MOUSEBUTTONDOWN:
+            if self.skip_cutscene():
+                return
             pos = self.virtual_mouse(event.pos)
             for button in self.buttons:
                 if button.rect.collidepoint(pos):
@@ -1296,18 +1165,27 @@ class XiangqiApp:
                 self.handle_board_click(square, event.button)
 
     def process_pending_click(self) -> None:
-        if self.move_animation and self.move_animation.progress(pygame.time.get_ticks()) >= 1.0:
-            self.move_animation = None
-        if self.move_animation is not None or self.pending_board_click is None:
+        if self.beats or self.pending_board_click is None:
             return
         square, button = self.pending_board_click
         self.pending_board_click = None
         self.handle_board_click(square, button)
 
+    def ai_controls_turn(self) -> bool:
+        if self.opponent_mode == "watch":
+            return True
+        return self.opponent_mode == "ai" and self.game.turn != self.human_side
+
     def update_ai(self) -> None:
-        if self.move_animation or self.mode != "play" or self.opponent_mode != "ai" or self.game.winner or self.game.turn == self.human_side:
+        if self.mode != "play" or self.game.winner or not self.ai_controls_turn() or self.gallery_scene is not None:
+            return
+        now = pygame.time.get_ticks()
+        if self.beats:
+            self.ai_ready_at = now + (650 if self.opponent_mode == "watch" else 120)
             return
         if self.ai_future is None:
+            if now < self.ai_ready_at:
+                return
             clone = self.game.clone()
             self.ai_position = self.game.to_fen()
             self.ai_future = self.executor.submit(self.ai.choose_move, clone)
@@ -1317,10 +1195,11 @@ class XiangqiApp:
             future, self.ai_future = self.ai_future, None
             try:
                 move = future.result()
-                if self.ai.load_error:
-                    self.message = f"PPO 模型：{self.ai.load_error}"
-                elif move and self.ai_position == self.game.to_fen():
+                if move and self.ai_position == self.game.to_fen():
                     self.play_move(move)
+                if self.ai.load_error and self.ai.load_error != self.ai_error_shown:
+                    self.ai_error_shown = self.ai.load_error
+                    self.message = f"PPO 模型：{self.ai.load_error}"
             except Exception as exc:
                 self.message = f"AI 计算失败：{exc}"
 
@@ -1328,6 +1207,7 @@ class XiangqiApp:
         while self.running:
             for event in pygame.event.get():
                 self.handle_event(event)
+            self.update_story()
             self.process_pending_click()
             self.update_ai()
             self.draw()
