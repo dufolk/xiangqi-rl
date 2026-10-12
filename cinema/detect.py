@@ -22,11 +22,18 @@ KIND_LABEL = {
 }
 
 
+Square = tuple[int, int]
+
+
 @dataclass(frozen=True)
 class StoryEvent:
-    """One dramatic beat produced by a move."""
+    """One dramatic beat produced by a move.
 
-    kind: str  # opening | capture | sacrifice | check | mate | stalemate
+    ``lines`` are (from, to) squares the board show should draw beams/arrows along,
+    ``targets`` are squares under attack, ``cast`` are attacker pieces that take part.
+    """
+
+    kind: str  # opening | capture | sacrifice | tactic | check | mate | stalemate
     key: str
     title: str
     subtitle: str
@@ -34,6 +41,11 @@ class StoryEvent:
     victim: Optional[Piece] = None
     attacker_line: str = ""
     victim_line: str = ""
+    lines: tuple[tuple[Square, Square], ...] = ()
+    targets: tuple[Square, ...] = ()
+    cast: tuple[Square, ...] = ()
+    tone: str = "even"  # dominant | even | desperate, from the actor's point of view
+    tag: str = ""
 
 
 OPENINGS: dict[str, tuple[str, str]] = {
@@ -131,6 +143,23 @@ MATES: dict[str, tuple[str, str]] = {
 
 STALEMATE = ("困毙", "将未被将，却已无路可走")
 
+TACTICS: dict[str, tuple[str, str]] = {
+    "fork": ("捉双", "一子双捉 · 顾此失彼"),
+    "discovered_attack": ("闪击", "移步让线 · 身后暗箭齐发"),
+    "discovered_check": ("闪将", "让开一线 · 背后将军"),
+    "double_check": ("双将", "两路同将 · 只能动王"),
+    "check_win": ("将军抽{x}", "先将一军 · 回手再抽{x}"),
+}
+
+VALUE = {KING: 0.0, ROOK: 9.0, CANNON: 4.5, HORSE: 4.0, ELEPHANT: 2.0, ADVISOR: 2.0, PAWN: 1.0}
+
+SITUATIONS = {
+    "red_big": "红方大优", "red_up": "红方小优", "even": "相持",
+    "black_up": "黑方小优", "black_big": "黑方大优",
+}
+
+TONE_TAGS = {"dominant": "乘胜追击", "desperate": "绝地反击", "comeback": "扳回一城", "breakthrough": "打破均势"}
+
 
 def _side_name(side: str) -> str:
     return "红方" if side == RED else "黑方"
@@ -204,14 +233,15 @@ def detect_opening(game: XiangqiGame, move: Move, piece: Piece) -> Optional[str]
     """
     if move.captured is not None:
         return None
+    count = sum(1 for _ in iter_pieces(game.board))
     side = piece.side
     home = 9 if side == RED else 0
     fwd = -1 if side == RED else 1
     if piece.kind == HORSE and game.halfmove <= 6 and move.end[0] == home + 2 * fwd and move.end[1] in (2, 6):
         partner = (move.end[0], 8 - move.end[1])
-        if game.piece_at(partner) == Piece(side, HORSE) and game.halfmove > 2:
+        if game.piece_at(partner) == Piece(side, HORSE) and game.halfmove > 2 and count >= 30:
             return "screen_horses"
-    if game.halfmove not in (1, 2):
+    if game.halfmove not in (1, 2) or count != 32:
         return None
     key = _first_move_opening(game, move, piece)
     if key == "center_cannon" and game.halfmove == 2 and len(game.history) >= 2:
@@ -335,11 +365,226 @@ def classify_attack_pattern(game: XiangqiGame, move: Move, piece: Piece) -> str:
     return "generic"
 
 
-def capture_event(piece: Piece, victim: Piece) -> StoryEvent:
+def pattern_cast(game: XiangqiGame, key: str, attacker: str) -> tuple[Square, ...]:
+    """Attacker pieces that star in a mating / checking pattern, checkers first."""
+    defender = opponent(attacker)
+    king = game.king_position(defender)
+    if king is None:
+        return ()
+    cast = [pos for pos, _ in _attackers(game, attacker, king)]
+    own = [((r, c), p) for r, c, p in iter_pieces(game.board) if p.side == attacker]
+    extra: list[Square] = []
+    if key == "double_rook":
+        extra = [pos for pos, p in own if p.kind == ROOK]
+    elif key == "two_ghosts":
+        extra = [pos for pos, p in own if p.kind == PAWN and depth_of(pos[0], defender) <= 2 and 2 <= pos[1] <= 6]
+    elif key in ("double_cannon", "horse_cannon"):
+        for pos in list(cast):
+            if game.piece_at(pos).kind == CANNON:
+                screen = _cannon_screen(game, pos, king)
+                if screen and screen[1].side == attacker:
+                    extra.append(screen[0])
+    elif key in ("heaven_earth", "iron_bolt"):
+        extra = [pos for pos, p in own if p.kind == CANNON]
+    elif key == "facing_kings":
+        extra = [pos for pos, p in own if p.kind == KING]
+    for pos in extra:
+        if pos not in cast:
+            cast.append(pos)
+    return tuple(cast)
+
+
+# --- material & situation --------------------------------------------------------
+
+def piece_value(piece: Piece, row: int) -> float:
+    value = VALUE[piece.kind]
+    if piece.kind == PAWN and (row <= 4 if piece.side == RED else row >= 5):
+        value += 1.0
+    return value
+
+
+def material_balance(board) -> float:
+    """Material from red's point of view, in pawn units."""
+    total = 0.0
+    for row, _, piece in iter_pieces(board):
+        total += piece_value(piece, row) * (1 if piece.side == RED else -1)
+    return total
+
+
+def situation(balance: float) -> str:
+    if balance >= 6:
+        return "red_big"
+    if balance >= 2.5:
+        return "red_up"
+    if balance <= -6:
+        return "black_big"
+    if balance <= -2.5:
+        return "black_up"
+    return "even"
+
+
+def lead_of(balance: float, side: str) -> float:
+    return balance if side == RED else -balance
+
+
+def tone_for(balance: float, side: str) -> str:
+    lead = lead_of(balance, side)
+    if lead >= 2.5:
+        return "dominant"
+    if lead <= -2.5:
+        return "desperate"
+    return "even"
+
+
+def capture_tag(before: float, after: float, side: str) -> str:
+    tone = tone_for(before, side)
+    if tone == "desperate":
+        return TONE_TAGS["comeback"] if lead_of(after, side) > -2.5 else TONE_TAGS["desperate"]
+    if tone == "dominant":
+        return TONE_TAGS["dominant"]
+    return TONE_TAGS["breakthrough"] if lead_of(after, side) >= 2.5 else ""
+
+
+# --- tactics -------------------------------------------------------------------
+
+def _hits(game: XiangqiGame, square: Square) -> list[tuple[Square, Piece]]:
+    return [(m.end, m.captured) for m in game.pseudo_moves_from(*square) if m.captured is not None]
+
+
+def _protected(game: XiangqiGame, square: Square) -> bool:
+    piece = game.piece_at(square)
+    if piece is None:
+        return False
+    game.board[square[0]][square[1]] = Piece(opponent(piece.side), PAWN)
+    guarded = game._attacks_square(piece.side, square)
+    game.board[square[0]][square[1]] = piece
+    return guarded
+
+
+def _real_threat(game: XiangqiGame, attacker_square: Square, target: Square) -> bool:
+    """A target worth shouting about: a major piece that is undefended or worth more than its attacker."""
+    attacker = game.piece_at(attacker_square)
+    victim = game.piece_at(target)
+    if attacker is None or victim is None or VALUE[victim.kind] < 4:
+        return False
+    return VALUE[victim.kind] > VALUE[attacker.kind] or not _protected(game, target)
+
+
+def _between(a: Square, b: Square, square: Square) -> bool:
+    (r1, c1), (r2, c2), (r, c) = a, b, square
+    if r1 == r2 == r:
+        return min(c1, c2) < c < max(c1, c2)
+    if c1 == c2 == c:
+        return min(r1, r2) < r < max(r1, r2)
+    return False
+
+
+def _horse_leg(horse: Square, target: Square) -> Square:
+    dr, dc = target[0] - horse[0], target[1] - horse[1]
+    if abs(dr) == 2:
+        return horse[0] + dr // 2, horse[1]
+    return horse[0], horse[1] + dc // 2
+
+
+def _unmasked(before: XiangqiGame, after: XiangqiGame, move: Move, side: str) -> list[tuple[Square, Square]]:
+    """(attacker, target) pairs opened up because ``move`` stepped out of the line."""
+    found = []
+    for row, col, piece in iter_pieces(after.board):
+        here = (row, col)
+        if piece.side != side or here == move.end or piece.kind not in (ROOK, CANNON, HORSE):
+            continue
+        old = {sq for sq, _ in _hits(before, here)}
+        for target, _ in _hits(after, here):
+            if target in old:
+                continue
+            if piece.kind == HORSE:
+                opened = _horse_leg(here, target) == move.start
+            else:
+                opened = _between(here, target, move.start)
+            if opened:
+                found.append((here, target))
+    return found
+
+
+def _check_win(game: XiangqiGame, attacker: str) -> Optional[tuple[Square, Square, Piece]]:
+    """After a check, the material the attacker is guaranteed to pick up whatever the defence."""
+    defender = opponent(attacker)
+    replies = game.legal_moves(defender)
+    if not replies:
+        return None
+    worst: Optional[tuple[float, tuple[Square, Square, Piece]]] = None
+    board = game.board
+    for reply in replies:
+        moving, taken = board[reply.start[0]][reply.start[1]], board[reply.end[0]][reply.end[1]]
+        board[reply.end[0]][reply.end[1]], board[reply.start[0]][reply.start[1]] = moving, None
+        best: Optional[tuple[float, tuple[Square, Square, Piece]]] = None
+        for row, col, piece in list(iter_pieces(board)):
+            if piece.side != attacker:
+                continue
+            for m in game.pseudo_moves_from(row, col):
+                if m.captured is None or VALUE[m.captured.kind] < 4 or not game._is_legal(m, attacker):
+                    continue
+                gain = VALUE[m.captured.kind]
+                board[m.end[0]][m.end[1]], board[row][col] = piece, None
+                if game._attacks_square(defender, m.end):
+                    gain -= VALUE[piece.kind]
+                board[row][col], board[m.end[0]][m.end[1]] = piece, m.captured
+                if best is None or gain > best[0]:
+                    best = (gain, ((row, col), m.end, m.captured))
+        board[reply.start[0]][reply.start[1]], board[reply.end[0]][reply.end[1]] = moving, taken
+        if best is None or best[0] < 3.5:
+            return None
+        if worst is None or best[0] < worst[0]:
+            worst = best
+    return worst[1] if worst else None
+
+
+def detect_tactic(before: XiangqiGame, after: XiangqiGame, move: Move, piece: Piece) -> Optional[StoryEvent]:
+    """捉双 / 闪击 / 闪将 / 双将 / 将军抽X for a move that did not end the game."""
+    side = piece.side
+    defender = opponent(side)
+    king = after.king_position(defender)
+    if king is None or after.winner is not None:
+        return None
+    if after.is_in_check(defender):
+        checkers = [pos for pos, _ in _attackers(after, side, king)]
+        lines = tuple((pos, king) for pos in checkers)
+        won = _check_win(after, side)
+        if won is not None:
+            capturer, target, victim = won
+            title, subtitle = TACTICS["check_win"]
+            name = KIND_LABEL[(victim.side, victim.kind)]
+            return StoryEvent(
+                "tactic", "check_win", title.format(x=name), subtitle.format(x=name), piece, victim,
+                lines=lines + ((capturer, target),), targets=(king, target), cast=tuple(dict.fromkeys(checkers + [capturer])),
+            )
+        if len(checkers) >= 2:
+            title, subtitle = TACTICS["double_check"]
+            return StoryEvent("tactic", "double_check", title, subtitle, piece, lines=lines, targets=(king,), cast=tuple(checkers))
+        if move.end not in checkers:
+            title, subtitle = TACTICS["discovered_check"]
+            return StoryEvent("tactic", "discovered_check", title, subtitle, piece, lines=lines, targets=(king,),
+                              cast=tuple(checkers + [move.end]))
+        return None
+    forks = [sq for sq, victim in _hits(after, move.end) if victim.kind != KING and _real_threat(after, move.end, sq)]
+    if len(forks) >= 2:
+        title, subtitle = TACTICS["fork"]
+        names = "与".join(KIND_LABEL[(after.piece_at(sq).side, after.piece_at(sq).kind)] for sq in forks[:2])
+        return StoryEvent("tactic", "fork", title, f"{subtitle} · {names}难以兼顾", piece,
+                          lines=tuple((move.end, sq) for sq in forks), targets=tuple(forks), cast=(move.end,))
+    opened = [(src, dst) for src, dst in _unmasked(before, after, move, side) if _real_threat(after, src, dst)]
+    if opened:
+        title, subtitle = TACTICS["discovered_attack"]
+        return StoryEvent("tactic", "discovered_attack", title, subtitle, piece, lines=tuple(opened),
+                          targets=tuple(dst for _, dst in opened), cast=tuple(dict.fromkeys([src for src, _ in opened] + [move.end])))
+    return None
+
+
+def capture_event(piece: Piece, victim: Piece, tone: str = "even", tag: str = "") -> StoryEvent:
     key = piece.kind + victim.kind
     title, attacker_line, victim_line = CAPTURES[key]
     subtitle = f"{KIND_LABEL[(piece.side, piece.kind)]} 吃 {KIND_LABEL[(victim.side, victim.kind)]}"
-    return StoryEvent("capture", key, title, subtitle, piece, victim, attacker_line, victim_line)
+    return StoryEvent("capture", key, title, subtitle, piece, victim, attacker_line, victim_line, tone=tone, tag=tag)
 
 
 def opening_event(key: str, piece: Piece) -> StoryEvent:
@@ -349,31 +594,61 @@ def opening_event(key: str, piece: Piece) -> StoryEvent:
     return StoryEvent("opening", key, title, f"{_side_name(piece.side)} · {subtitle}", piece)
 
 
-def mate_event(key: str, piece: Piece, finale: bool) -> StoryEvent:
+def mate_event(key: str, piece: Piece, finale: bool, game: Optional[XiangqiGame] = None) -> StoryEvent:
     title, subtitle = MATES[key]
     kind = "mate" if finale else "check"
     if not finale:
         title = "将  军" if key == "generic" else f"{title} · 将"
-    return StoryEvent(kind, key, title, subtitle, piece)
+    lines: tuple = ()
+    targets: tuple = ()
+    cast: tuple = ()
+    if game is not None:
+        king = game.king_position(opponent(piece.side))
+        if king is not None:
+            cast = pattern_cast(game, key, piece.side)
+            checkers = [pos for pos, _ in _attackers(game, piece.side, king)]
+            lines = tuple((pos, king) for pos in checkers)
+            targets = (king,)
+    return StoryEvent(kind, key, title, subtitle, piece, lines=lines, targets=targets, cast=cast)
+
+
+def _before(game: XiangqiGame) -> Optional[XiangqiGame]:
+    if not game.history:
+        return None
+    snap = game.history[-1]
+    previous = XiangqiGame(snap.board, snap.turn)
+    previous.halfmove = snap.halfmove
+    return previous
 
 
 def analyze_move(game: XiangqiGame, move: Move, piece: Piece) -> list[StoryEvent]:
     """Story beats for ``move`` (already pushed onto ``game``), in playback order."""
     events: list[StoryEvent] = []
+    before = _before(game)
     opening = detect_opening(game, move, piece)
     if opening:
         events.append(opening_event(opening, piece))
     if move.captured is not None:
-        events.append(capture_event(piece, move.captured))
+        balance_before = material_balance(before.board) if before else material_balance(game.board)
+        balance_after = material_balance(game.board)
+        events.append(capture_event(
+            piece, move.captured, tone_for(balance_before, piece.side),
+            capture_tag(balance_before, balance_after, piece.side),
+        ))
     defender = opponent(piece.side)
     if game.winner == piece.side and game.reason == "困毙":
         title, subtitle = STALEMATE
-        events.append(StoryEvent("stalemate", "stalemate", title, subtitle, piece))
+        king = game.king_position(defender)
+        events.append(StoryEvent("stalemate", "stalemate", title, subtitle, piece, targets=(king,) if king else ()))
         return events
+    if before is not None:
+        tactic = detect_tactic(before, game, move, piece)
+        if tactic is not None:
+            events.append(tactic)
     in_check = game.winner == piece.side or game.is_in_check(defender)
     if in_check:
         key = classify_attack_pattern(game, move, piece)
-        events.append(mate_event(key, piece, finale=game.winner == piece.side))
+        events.append(mate_event(key, piece, finale=game.winner == piece.side, game=game))
     elif (
         piece.kind == ROOK and move.captured == Piece(defender, ADVISOR)
         and depth_of(move.end[0], defender) == 1 and move.end[1] == 4
