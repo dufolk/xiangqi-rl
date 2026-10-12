@@ -300,7 +300,7 @@ def _lightning(cv, v, a, b, t: float, color=(170, 210, 255), z: float = 0.85) ->
 
 
 def _swords(cv, v, sq, u: float, t: float) -> None:
-    x, y, s = v.project(sq[0], sq[1], 1.1)
+    x, y, s = v.project(sq[0], sq[1], 0.7)
     close = ease_out(seg(u, 0, 0.35))
     length = s * 0.9
     for sgn in (-1, 1):

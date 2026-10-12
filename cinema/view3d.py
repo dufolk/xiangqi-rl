@@ -573,7 +573,12 @@ class BoardView:
         """One full frame: sky, flags, board, ground marks, pieces and characters, air and overlay effects."""
         self.draw_backdrop(canvas, now, mood)
         shake = frame.shake if frame else 0.0
-        self.offset = (math.sin(now / 23.0) * shake, math.cos(now / 31.0) * shake * 0.6) if shake else (0.0, 0.0)
+        tilt = 0.0
+        if frame and frame.focus is not None and frame.zoom > 1.01:
+            self.offset = (0.0, 0.0)
+            reach = canvas.get_height() / frame.zoom * 0.56
+            tilt = max(0.0, reach - self.point(frame.focus[0], frame.focus[1], 0.5)[1]) * min(1.0, (frame.zoom - 1) / 0.2)
+        self.offset = (math.sin(now / 23.0) * shake, math.cos(now / 31.0) * shake * 0.6 + tilt)
         self.draw_flag(canvas, BLACK if not self.flipped else RED, now, morale[1] if not self.flipped else morale[0])
         self.draw_flag(canvas, RED if not self.flipped else BLACK, now, morale[0] if not self.flipped else morale[1])
         self.draw_board(canvas)
@@ -589,9 +594,9 @@ class BoardView:
         for fn in (frame.overlay if frame else ()):
             fn(canvas, self)
             self.flush(canvas)
-        self.offset = (0.0, 0.0)
         if frame and frame.zoom > 1.01 and frame.focus is not None:
             self.push_in(canvas, frame.focus, frame.zoom)
+        self.offset = (0.0, 0.0)
         for fn in (frame.hud if frame else ()):
             fn(canvas, self)
         if frame and frame.flash > 0.01:
