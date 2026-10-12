@@ -1,4 +1,4 @@
-"""Record an AI-vs-AI match (or the cutscene gallery) to an MP4 using a virtual clock.
+"""Record an AI-vs-AI match (or the on-board story gallery) to an MP4 using a virtual clock.
 
 Examples:
     python tools/record_match.py --out match.mp4 --seconds 90
@@ -35,8 +35,9 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=1440)
     parser.add_argument("--story", choices=("full", "highlights", "off"), default="full")
     parser.add_argument("--fen", default="", help="start from a custom position instead of the opening")
-    parser.add_argument("--gallery", action="store_true", help="record the cutscene gallery instead of a match")
+    parser.add_argument("--gallery", action="store_true", help="record the story gallery instead of a match")
     parser.add_argument("--gallery-start", type=int, default=0)
+    parser.add_argument("--gallery-keys", default="", help="comma separated category/key demos to play in order")
     parser.add_argument("--depth", type=int, default=2)
     parser.add_argument("--frames-dir", default="", help="also dump every Nth frame as PNG into this directory")
     parser.add_argument("--frames-every", type=int, default=15)
@@ -48,8 +49,15 @@ def main() -> None:
     app = XiangqiApp()
     app.story_mode = args.story
     app.ai.depth = args.depth
+    playlist: list[int] = []
+    if args.gallery_keys:
+        from cinema.demos import catalogue
+
+        index = {(d.category, d.key): i for i, d in enumerate(catalogue())}
+        playlist = [index[tuple(item.split("/"))] for item in args.gallery_keys.split(",")]
+        args.gallery = True
     if args.gallery:
-        app.open_gallery(args.gallery_start)
+        app.open_gallery(playlist[0] if playlist else args.gallery_start)
     else:
         app.opponent_mode = "watch"
         app.new_game()
@@ -72,7 +80,16 @@ def main() -> None:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 break
-        app.update_story()
+        if playlist:
+            shown = app.gallery_index
+            app.update_story()
+            if app.gallery_index != shown:
+                playlist.pop(0)
+                if not playlist:
+                    break
+                app.open_gallery(playlist[0])
+        else:
+            app.update_story()
         app.update_ai()
         if app.ai_future is not None:
             app.ai_future.result()
@@ -81,7 +98,7 @@ def main() -> None:
         ffmpeg.stdin.write(pygame.image.tostring(frame, "RGB"))
         if args.frames_dir and index % args.frames_every == 0:
             pygame.image.save(app.canvas, os.path.join(args.frames_dir, f"frame_{index:05d}.png"))
-        if app.game.winner and not app.beats and not args.gallery and index > 0:
+        if app.game.winner and not app.busy and not args.gallery and index > 0:
             linger = getattr(app, "_linger", None)
             if linger is None:
                 app._linger = index
