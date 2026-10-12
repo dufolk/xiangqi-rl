@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from game_engine import (
-    ADVISOR, BLACK, CANNON, ELEPHANT, HORSE, KING, PAWN, RED, ROOK,
+    ADVISOR, CANNON, ELEPHANT, HORSE, KING, PAWN, RED, ROOK,
     Move, XiangqiGame, iter_pieces, opponent,
 )
 
@@ -153,6 +153,7 @@ class PPOAI:
         self._model = None
         self._device = None
         self.load_error: Optional[str] = None
+        self._unavailable = False
         from rl.environment import XiangqiEnv
 
         self._env = XiangqiEnv()
@@ -160,9 +161,10 @@ class PPOAI:
     def _ensure_loaded(self) -> bool:
         if self._model is not None:
             return True
-        import torch
-
+        if self._unavailable:
+            return False
         try:
+            import torch
             from rl.model import build_model
 
             device = torch.device(
@@ -182,8 +184,13 @@ class PPOAI:
             self._model = model
             self._device = device
             return True
+        except ImportError:
+            self._unavailable = True
+            self.load_error = "未安装 PyTorch，已改用 Alpha-Beta 搜索 AI"
+            return False
         except Exception as exc:  # noqa: BLE001 - surface load failures to the UI
-            self.load_error = f"加载 PPO 模型失败：{exc}"
+            self._unavailable = True
+            self.load_error = f"加载 PPO 模型失败：{exc}，已改用 Alpha-Beta 搜索 AI"
             return False
 
     def choose_move(self, game: XiangqiGame) -> Optional[Move]:
@@ -213,7 +220,5 @@ class PPOAI:
         end = raw_square(canonical_end, game.turn)
         return next((move for move in game.legal_moves_from(start) if move.end == end), None)
 
-    @staticmethod
-    def _fallback_move(game: XiangqiGame) -> Optional[Move]:
-        moves = game.legal_moves()
-        return random.choice(moves) if moves else None
+    def _fallback_move(self, game: XiangqiGame) -> Optional[Move]:
+        return SimpleAI(depth=min(2, self.depth)).choose_move(game)
