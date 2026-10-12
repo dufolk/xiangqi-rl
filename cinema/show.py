@@ -233,14 +233,24 @@ class MoveShow:
             setattr(sprite, key, value)
         return sprite
 
-    def bubble(self, f: Frame, sq, text: str, u: float, z: float = 1.45, shout: bool = False, size: int = 18) -> None:
+    def bubble(self, f: Frame, sq, text: str, u: float, z: float = 1.45, shout: bool = False, size: int = 18,
+               away=None, tie_flip: bool = False) -> None:
+        """Speech bubble above ``sq``; with ``away`` it opens on the side facing away from that square."""
         if not text or u <= 0 or u >= 1:
             return
 
         def draw(canvas: pygame.Surface, view: BoardView) -> None:
             x, y = view.point(sq[0], sq[1], z)
             y = max(y, 96.0)
-            tail = "down-left" if x < 470 else "down-right"
+            right_side = x < 470
+            if away is not None:
+                ax = view.point(away[0], away[1], z)[0]
+                if abs(ax - x) > 4:
+                    right_side = x > ax
+                elif tie_flip:
+                    right_side = not right_side
+                right_side = (right_side or x < 230) and x < 640
+            tail = "down-left" if right_side else "down-right"
             speech_bubble(canvas, text, (x, y), u, size=size, max_width=230, tail=tail, shout=shout)
         f.overlay.append(draw)
 
@@ -515,11 +525,12 @@ class MoveShow:
         elif not self.quick and active:
             if self.capture.attacker_line and self.mode == "full":
                 self.bubble(f, self.approach if kind != CANNON else self.move.start, self.capture.attacker_line,
-                            seg(lt, 0, I + 120), z=1.5)
+                            seg(lt, 0, I + 120), z=1.5, away=end)
             if self.slow:
                 self.in_air(f, lambda cv, v: _speed_burst(cv, v, self.approach, seg(lt, 0, I) * 0.7, lt))
         if not self.quick and self.mode == "full" and active and self.capture.victim_line:
-            self.bubble(f, end, self.capture.victim_line, seg(lt, I * 0.45, I + 420), z=1.45)
+            self.bubble(f, end, self.capture.victim_line, seg(lt, I * 0.45, I + 420), z=1.45,
+                        away=self.move.start if kind == CANNON else self.points[-2], tie_flip=True)
         if not self.quick:
             self.ribbon(f, self.capture.title, self.capture.subtitle, seg(lt, I + 120, self.cap_total + 200),
                         tag=self.capture.tag, color=_tag_color(self.tone, self.side))
