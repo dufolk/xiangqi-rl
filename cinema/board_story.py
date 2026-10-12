@@ -828,7 +828,7 @@ def _scared_target(show, f, sq, lt, dur, threat, line: str, wake: float = 400) -
     sp.look = threat
     sp.shake = math.sin(lt / 28.0) * 2.5
     show.in_air(f, lambda cv, v: (lambda x, y, s: sweat_drop(cv, (x + s * 0.3, y), s * 0.12, lt))(*v.project(sq[0], sq[1], 1.0)))
-    show.bubble(f, sq, line, seg(lt, wake + 200, wake + 1000), z=1.4, size=15)
+    show.bubble(f, sq, line, seg(lt, wake + 200, wake + 1000), z=1.4, size=15, away=threat, tie_flip=True)
 
 
 def _fork(show, f, e, lt, u, active, dur):
@@ -948,7 +948,9 @@ def _check_win(show, f, e, lt, u, active, dur):
             pygame.draw.arc(cv, GOLD, pygame.Rect(int(b[0] - r), int(b[1] - 4), 2 * r, 2 * r), math.pi, math.tau, 4)
     show.in_air(f, hook_line)
     _scared_target(show, f, target, lt, dur, capturer, "我……我被抽了？", wake=900)
-    show.stamp(f, target, "抽", seg(lt, 1200, dur), z=1.9, size=0.75)
+    side = capturer[1] - target[1] or (-1 if target[1] > 4 else 1)
+    seal_at = (target[0], target[1] + math.copysign(0.95, side))
+    show.stamp(f, seal_at, "抽", seg(lt, 1200, dur), z=0.9, size=0.7)
     _ribbon(show, f, e, lt, dur, 1000)
 
 
