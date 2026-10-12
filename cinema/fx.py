@@ -130,6 +130,9 @@ def onomatopoeia(surf: pygame.Surface, text: str, center, size: float, color, u:
                   scale=max(0.05, pop), angle=angle, alpha=int(255 * fade))
 
 
+CLOSING_PUNCTUATION = "，。！？、；：）》」』…～!?,.;:)"
+
+
 def wrap_cjk(text: str, f: pygame.font.Font, max_width: int) -> list[str]:
     lines, line = [], ""
     for ch in text:
@@ -137,7 +140,7 @@ def wrap_cjk(text: str, f: pygame.font.Font, max_width: int) -> list[str]:
             lines.append(line)
             line = ""
             continue
-        if f.size(line + ch)[0] > max_width and line:
+        if f.size(line + ch)[0] > max_width and line and ch not in CLOSING_PUNCTUATION:
             lines.append(line)
             line = ch
         else:

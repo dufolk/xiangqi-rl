@@ -16,7 +16,7 @@ from ai_player import PPOAI
 from cinema.demos import catalogue
 from cinema.detect import SITUATIONS, StoryEvent, analyze_move, material_balance, situation
 from cinema.fonts import load_font
-from cinema.fx import seg
+from cinema.fx import seg, wrap_cjk
 from cinema.show import MoveShow, draw_ribbon
 from cinema.view3d import VIEW_W, BoardView, Frame, Sprite
 from game_engine import KING, KINDS, RED, BLACK, ROOK, HORSE, CANNON, Move, Piece, XiangqiGame
@@ -341,8 +341,7 @@ class XiangqiApp:
         self.draw_panel(commentary)
         self.draw_text("解说", self.fonts["tiny"], GOLD_LIGHT, (x + 18, y + 94))
         pygame.draw.line(self.canvas, (140, 96, 54), (x + 60, y + 103), (x + SIDE_W - 20, y + 103), 1)
-        width = 27
-        lines = [self.commentary[i:i + width] for i in range(0, min(len(self.commentary), width * 3), width)]
+        lines = wrap_cjk(self.commentary, self.fonts["small"], SIDE_W - 40)
         for index, line in enumerate(lines[:3]):
             self.draw_text(line, self.fonts["small"], TEXT, (x + 18, y + 114 + index * 22))
 
