@@ -76,8 +76,18 @@ def wobble(t: float, speed: float = 1.0, amount: float = 1.0) -> float:
     return math.sin(t * 0.012 * speed) * amount
 
 
+_LAYERS: dict[tuple[int, int], pygame.Surface] = {}
+
+
 def _alpha_layer(surf: pygame.Surface) -> pygame.Surface:
-    return pygame.Surface(surf.get_size(), pygame.SRCALPHA)
+    """A cleared full-size scratch layer; callers must blit it before requesting another."""
+    size = surf.get_size()
+    layer = _LAYERS.get(size)
+    if layer is None:
+        layer = _LAYERS[size] = pygame.Surface(size, pygame.SRCALPHA)
+    else:
+        layer.fill((0, 0, 0, 0))
+    return layer
 
 
 def with_alpha(color, a: float) -> tuple[int, int, int, int]:
