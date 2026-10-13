@@ -38,7 +38,7 @@ def main() -> None:
     parser.add_argument("--gallery", action="store_true", help="record the story gallery instead of a match")
     parser.add_argument("--gallery-start", type=int, default=0)
     parser.add_argument("--gallery-keys", default="", help="comma separated category/key demos to play in order")
-    parser.add_argument("--depth", type=int, default=2)
+    parser.add_argument("--depth", type=int, default=3, help="AI level 1-5 (萌新/入门/进阶/高手/大师)")
     parser.add_argument("--frames-dir", default="", help="also dump every Nth frame as PNG into this directory")
     parser.add_argument("--frames-every", type=int, default=15)
     args = parser.parse_args()
@@ -109,6 +109,7 @@ def main() -> None:
     elapsed = time.time() - started
     print(f"wrote {args.out}: {index + 1} frames in {elapsed:.1f}s ({(index + 1) / max(elapsed, 1e-6):.1f} fps render)")
     app.executor.shutdown(wait=False, cancel_futures=True)
+    app.ai.close()
     pygame.quit()
 
 
