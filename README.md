@@ -1,11 +1,11 @@
 # 木韵棋院 · 中国象棋 PPO 实验场
 
-一个从零重构的中国象棋桌面项目：包含完整规则引擎、现代化 GUI、自定义棋局编辑器、红黑视角翻转、Alpha-Beta 基线对手，以及可直接扩展的 Masked PPO 自博弈训练平台。
+一个从零重构的中国象棋桌面项目：包含完整规则引擎、现代化 GUI、自定义棋局编辑器、红黑视角翻转、Pikafish 引擎对手，以及可直接扩展的 Masked PPO 自博弈训练平台。
 
 ## 功能
 
 - 完整中国象棋走子规则：蹩马腿、塞象眼、炮架、过河兵、九宫、将帅照面、将军与困毙；
-- 人机对弈与本地双人模式，AI 搜索深度可在 GUI 内切换；
+- 人机对弈与本地双人模式；AI 由 [Pikafish](https://github.com/official-pikafish/Pikafish)（NNUE 象棋引擎）驱动，`棋力` 按钮在 萌新 / 入门 / 进阶 / 高手 / 大师 五档间切换，AI 一侧会显示引擎评估与搜索深度；未安装引擎时自动退回 PPO 网络或 Alpha-Beta；
 - 一键翻转红黑视角、悔棋、中文着法记录；
 - 2.5D 木质棋盘：透视相机把整张木棋盘摆在桌面上，棋子是有厚度的木质圆棋；天空随局势变化（黑方占优时乌云闪电、相持时黄昏、红方占优时朝阳），两侧帅/將旗随士气升起或低垂；
 - 棋盘上的剧情演出：轮到谁动，谁就“醒来”变成手绘卡通角色，在真实的格子上走位、出招、受击，演完再变回木棋。所有特效都锚定在棋盘坐标上，随棋子位置、翻转视角而变，关键时刻镜头会自动推近：
@@ -25,8 +25,19 @@
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python tools/fetch_pikafish.py   # 下载 Pikafish 引擎与 NNUE 权重到 engines/pikafish/
 .venv/bin/python main.py
 ```
+
+`tools/fetch_pikafish.py` 会从 Pikafish 官方 GitHub Release 下载最新版本，解压出当前平台（Windows / macOS / Linux x86-64）的通用二进制和 `pikafish.nnue`；加 `--all` 可一次装好三个平台，`--tag` 指定版本。也可以用环境变量 `PIKAFISH_PATH` 指向自己编译的引擎（`pikafish.nnue` 需与之同目录）。
+
+| 棋力 | 搜索方式 |
+| --- | --- |
+| 萌新 | 深度 1，在前 6 条候选里按分差随机挑选 |
+| 入门 | 深度 4，前 4 条候选随机 |
+| 进阶 | 深度 8，前 3 条候选小幅随机 |
+| 高手（默认） | 每步思考 0.8 秒，走最佳着法 |
+| 大师 | 每步思考 2.5 秒，走最佳着法 |
 
 快捷键：`F` 翻转棋盘，`U` 悔棋，`R` 新对局，`空格`/点击 跳过当前演出，`G` 打开演出图鉴（`←`/`→` 切换），`Esc` 退出。
 
@@ -116,7 +127,8 @@ TensorBoard 包含：总策略/价值损失、熵、近似 KL、裁剪比例、�
 |---|---|
 | `main.py` / `app.py` | 桌面入口与 Pygame GUI |
 | `game_engine.py` | 无 UI 规则引擎、FEN、走子与撤销 |
-| `ai_player.py` | Alpha-Beta 基线 AI |
+| `ai_player.py` | Pikafish UCI 引擎封装、PPO 对手与 Alpha-Beta 基线 |
+| `tools/fetch_pikafish.py` | 下载 Pikafish 引擎与 NNUE 权重 |
 | `state_codec.py` | 状态序列化 |
 | `cinema/detect.py` | 无 UI 的剧情识别：开局、吃子组合、局势/语气、战术（捉双/闪击/闪将/双将/抽子）、杀法图形 |
 | `cinema/view3d.py` | 2.5D 透视相机、木质棋盘与棋子、天空/旗帜、深度排序与镜头推近 |

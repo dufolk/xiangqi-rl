@@ -12,7 +12,7 @@ os.environ.setdefault("SDL_HINT_VIDEO_HIGHDPI_DISABLED", "0")
 
 import pygame
 
-from ai_player import PPOAI
+from ai_player import PikafishAI, PPOAI, SimpleAI
 from cinema.demos import catalogue
 from cinema.detect import SITUATIONS, StoryEvent, analyze_move, material_balance, situation
 from cinema.fonts import load_font
@@ -74,7 +74,11 @@ class XiangqiApp:
         self.game = XiangqiGame()
         snapshots = __import__("glob").glob("checkpoints/ppo_snapshot_*.pt")
         pinned = max(snapshots, key=os.path.getmtime) if snapshots else None
-        self.ai = PPOAI(checkpoint=pinned, depth=2)
+        try:
+            fallback = PPOAI(checkpoint=pinned, depth=3)
+        except ImportError:
+            fallback = SimpleAI(depth=2)
+        self.ai = PikafishAI(depth=4, fallback=fallback)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="xiangqi-ai")
         self.ai_future: Optional[Future] = None
         self.ai_position = ""
@@ -312,7 +316,7 @@ class XiangqiApp:
         y += 54
         self.add_button("mode", x, y, 124, "模式 · " + MODE_LABELS[self.opponent_mode], active=self.opponent_mode != "local")
         self.add_button("side", x + 135, y, 124, "执子 · " + ("红" if self.human_side == RED else "黑"))
-        self.add_button("depth", x + 270, y, 124, f"棋力 · {'萌新' if self.ai.depth == 1 else '进阶' if self.ai.depth == 2 else '高手'}")
+        self.add_button("depth", x + 270, y, 124, f"棋力 · {self.ai.level.name}")
         self.add_button("story", x + 405, y, 125, "演出 · " + STORY_LABELS[self.story_mode], active=self.story_mode != "off")
         if self.mode == "editor":
             self.draw_editor_panel(x, y + 62)
@@ -332,10 +336,14 @@ class XiangqiApp:
             face = self.view.puck(Piece(side, KING), 56, 1.0)
             self.canvas.blit(face, face.get_rect(center=(px + 26, y + 35)))
             label = ("红帅" if side == RED else "黑将")
-            if self.opponent_mode == "watch" or (side != self.human_side and self.opponent_mode == "ai"):
-                label += " · AI"
+            engine_side = self.opponent_mode == "watch" or (side != self.human_side and self.opponent_mode == "ai")
+            if engine_side:
+                label += f" · {self.ai.name}"
             self.draw_text(label, self.fonts["button"], TEXT, (px + 62, y + 14))
-            self.draw_text("正在思考" if active else "等待回合", self.fonts["tiny"], (RED_T if side == RED else BLACK_T) if active else MUTED, (px + 62, y + 40))
+            state = "正在思考" if active else "等待回合"
+            if engine_side and not active and self.ai.last_eval is not None:
+                state = f"{self.ai.last_eval.label()} · 深度 {self.ai.last_eval.depth}"
+            self.draw_text(state, self.fonts["tiny"], (RED_T if side == RED else BLACK_T) if active else MUTED, (px + 62, y + 40))
 
         commentary = pygame.Rect(x, y + 82, SIDE_W, 100)
         self.draw_panel(commentary)
@@ -398,7 +406,7 @@ class XiangqiApp:
         pygame.draw.circle(self.canvas, color, (SIDE_X + 26, 816), 6)
         message = self.message
         if "思考" in message:
-            message = "AI 正在思考" + "." * (1 + pygame.time.get_ticks() // 350 % 3)
+            message = f"{self.ai.name} 正在思考" + "." * (1 + pygame.time.get_ticks() // 350 % 3)
         self.draw_text(message[:30], self.fonts["body"], TEXT, (SIDE_X + 44, 804))
         self.draw_text("F 翻转  U 悔棋  R 新局  空格/点击 跳过演出  G 图鉴", self.fonts["tiny"], MUTED, (SIDE_X + 44, 840))
 
@@ -452,6 +460,7 @@ class XiangqiApp:
     def new_game(self) -> None:
         self.cancel_ai()
         self.game.reset()
+        self.ai.last_eval = None
         self.mode = "play"
         self.selected = None
         self.legal_moves = []
@@ -668,8 +677,7 @@ class XiangqiApp:
             self.human_side = BLACK if self.human_side == RED else RED
             self.new_game()
         elif key == "depth":
-            self.ai.depth = 1 if self.ai.depth >= 3 else self.ai.depth + 1
-            self.message = f"AI 棋力已设为 {'入门' if self.ai.depth == 1 else '进阶' if self.ai.depth == 2 else '高手'}"
+            self.message = f"{self.ai.name} 棋力已设为「{self.ai.cycle_level().name}」"
         elif key == "standard":
             turn = self.game.turn
             self.game.reset()
@@ -795,10 +803,10 @@ class XiangqiApp:
         if self.ai_future is None:
             if now < self.ai_ready_at:
                 return
-            clone = self.game.clone()
+            clone = self.game.clone(with_history=True)
             self.ai_position = self.game.to_fen()
             self.ai_future = self.executor.submit(self.ai.choose_move, clone)
-            self.message = "AI 正在思考"
+            self.message = f"{self.ai.name} 正在思考"
             return
         if self.ai_future.done():
             future, self.ai_future = self.ai_future, None
@@ -808,7 +816,7 @@ class XiangqiApp:
                     self.play_move(move)
                 if self.ai.load_error and self.ai.load_error != self.ai_error_shown:
                     self.ai_error_shown = self.ai.load_error
-                    self.message = f"PPO 模型：{self.ai.load_error}"
+                    self.message = self.ai.load_error
             except Exception as exc:
                 self.message = f"AI 计算失败：{exc}"
 
@@ -822,6 +830,7 @@ class XiangqiApp:
             self.draw()
             self.clock.tick(60)
         self.executor.shutdown(wait=False, cancel_futures=True)
+        self.ai.close()
         pygame.quit()
 
 
